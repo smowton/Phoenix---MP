@@ -30,6 +30,12 @@
 #include "locality.h"
 #include "processor.h"
 
+#include <stdlib.h>
+#include <ctype.h>
+#include <string.h>
+
+#include <iostream>
+#include <vector>
 
 #ifdef _SOLARIS_
 #define NUM_CORES_PER_CHIP      8
@@ -106,6 +112,54 @@ public:
         return (thr+offset) % num_cpus;
 #endif
     }
+};
+
+class sched_policy_user_defined : public sched_policy
+{
+
+  std::vector<int> thread_cores;
+
+ public:
+  sched_policy_user_defined() {
+
+    char* save_ptr;
+    char* strtok_in = getenv("MR_THREAD_CORES");
+    if(strtok_in) {
+      
+      while(char* next_tok = strtok_r(strtok_in, ",", &save_ptr)) {
+      
+	char* end_ptr;
+	long next_id = strtol(next_tok, &end_ptr, 10);
+
+	while(isspace(*end_ptr))
+	  end_ptr++;
+      
+	if((*end_ptr) != 0 || end_ptr == next_tok) {
+	  std::cerr << "MR_THREAD_CORES must be a comma-delimited list of integer core IDs" << std::endl;
+	  exit(1);
+	}
+	else {
+	  thread_cores.push_back((int)next_id);
+	}
+
+	strtok_in = 0;
+
+      }
+
+    }
+
+  }
+
+  int thr_to_cpu(int thr) const
+  {
+    if(thr < (int)thread_cores.size())
+      return thread_cores[thr];
+    else {
+      std::cerr << "Warning: no binding specified for thread " << thr << ", assigning " << thr % num_cpus << std::endl;
+      return thr % num_cpus;
+    }
+  }
+
 };
 
 #endif /* SCHEDULER_H_ */

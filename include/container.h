@@ -31,6 +31,8 @@
 #include <list>
 #include <map>
 
+#include "serialize.h"
+
 // storage for flexible cardinality keys
 template<typename K, typename V, class Hash=std::tr1::hash<K>, 
     template<class> class Allocator = std::allocator>
@@ -186,6 +188,39 @@ public:
         }
     }
 
+    void do_export(input_type const& j, std::ostream** outputs) {
+
+      Hash kh;
+      for(typename input_type::const_iterator i = j.begin(); i != j.end(); ++i) 
+	{
+	  if(!(*i).second.empty()) {
+	    std::ostream& tgt = *outputs[kh((*i).first)%out_size];
+	    tgt.write("R", 1);
+	    serialize_to((*i).first, tgt);
+	    (*i).second.serialize(tgt);
+	  }
+	}
+      for(uint64_t i = 0; i < out_size; i++)
+	outputs[i]->write("X", 1);
+
+    }
+
+    void import(uint64_t mapper_index, uint64_t reducer_index, std::istream& iss) {
+
+      char c;
+      iss.read(&c, 1);
+      while(c == 'R') {
+	K key;
+	Combiner<V, Allocator> value;
+	deserialize_from(key, iss);
+	deserialize_from(value, iss);
+	vals[reducer_index * in_size + mapper_index].push_back(std::make_pair(key, value));
+	iss.read(&c, 1);
+      }
+      assert(c == 'X');
+
+    }
+
     class iterator
     {
     private:
@@ -269,6 +304,28 @@ public:
         delete [] j;
     }
 
+    void do_export(input_type const& j, std::ostream** outputs) {
+
+      // Unlike hash_container above there's no need to delimit the stream as we know how many values we're sending and keys are implicit.
+      for(uint64_t i = 0; i < N; ++i) {
+	// To match the behaviour of begin() below, we must interleave the possible keys to different outputs.
+	j[i].serialize(*outputs[i % out_size]);
+      }
+      delete [] j;
+
+    }
+
+    void import(uint64_t mapper_index, uint64_t reducer_index, std::istream& iss) {    
+
+      for(uint64_t i = reducer_index; i < N; i += out_size) { 
+      // Note that begin() uses in_size. In fact in_size always equals out_size, and out_ makes more sense to me.
+	Combiner<V, Allocator> result;
+      	deserialize_from(result, iss);
+        vals[i*in_size + mapper_index] = result;
+      }
+
+    }
+
     input_type get(uint64_t in_index)
     {
 	//switch to use allocator here...
@@ -295,11 +352,13 @@ public:
                 return false;
             key = (K)i;
             values.clear();
+	    // This feeds the reducer the set of all mapper-threads' assignments to the supplied key
             for(size_t j = 0; j < ac->in_size; j++)
             {
                 if(!ac->vals[i*ac->in_size+j].empty())
                     values.add(&ac->vals[i*ac->in_size+j]);
             }
+	    // Then we cheat and bump the index so that the reducers will interleave the keys
             i += ac->in_size;	// XXX: in_size == num reduce threads
             return true;
         }

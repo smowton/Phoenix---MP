@@ -114,9 +114,9 @@ int main(int argc, char *argv[]) {
     srand( (unsigned)time( NULL ) );
 
     // Make sure a filename is specified
-    if (argv[1] == NULL)
+    if (argc < 2)
     {
-        dprintf("USAGE: %s [side of matrix] [size of Row block]\n", argv[0]);
+        fprintf(stderr, "USAGE: %s [side of matrix] [size of Row block] [create matrix files]\n", argv[0]);
         exit(1);
     }
 
@@ -127,12 +127,12 @@ int main(int argc, char *argv[]) {
 
     fprintf(stderr, "***** file size is %d\n", file_size);
 
-    if(argv[2] == NULL)
+    if(argc < 3)
         row_block_len = 1;
     else
         CHECK_ERROR ( (row_block_len = atoi(argv[2])) < 0);
 
-    if(argv[3] != NULL)
+    if(argc >= 4)
         create_files = 1;
     else
         create_files = 0;

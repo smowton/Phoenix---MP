@@ -28,6 +28,9 @@
 #define COMBINER_H_
 
 #include <vector>
+#include <sstream>
+
+#include "serialize.h"
 
 // The assumption with a combiner is that it will be very cheap to copy 
 // (e.g. as cheap as a pointer or two)
@@ -99,10 +102,39 @@ public:
         }
     };
 
+#ifdef COMM_HACKS
+    void serialize(std::ostream& out_str) const {
+      
+      unsigned sz = data->size();
+      out_str.write((const char*)&sz, sizeof(unsigned));
+      for(int i = 0; i < data->size(); i++) {
+	serialize_to((*data)[i], out_str);
+      }
+      
+    }
+#endif
+
     void combineinto(combined& m) const {
         m.add(*this);
     }
 };
+
+#ifdef COMM_HACKS
+
+template<typename V, template<class> class Allocator> void deserialize_from(buffer_combiner<V, Allocator>& result, std::istream& in_str) {
+
+  unsigned n_items;
+  in_str.read((const char*)&n_items, sizeof(unsigned));
+  
+  for(int i = 0; i < n_items; i++) {
+    V item;
+    deserialize_from(item, in_str);
+    result.add(item);
+  }
+  
+}
+
+#endif
 
 #ifndef MUST_REDUCE
 
@@ -154,6 +186,14 @@ public:
             _empty = true;
         }
     };
+
+#ifdef COMM_HACKS
+    void serialize(std::ostream& out_str) const {
+
+      serialize_to(data, out_str);
+
+    }
+#endif
 
     void combineinto(combined& m) const {
         m.add(data);
@@ -219,6 +259,18 @@ public:
         }
     };
 
+#ifdef COMM_HACKS
+    void serialize(std::ostream& out_str) const {
+      
+      unsigned sz = data->size();
+      out_str.write((const char*)&sz, sizeof(unsigned));
+      for(int i = 0; i < data->size(); i++) {
+	serialize_to((*data)[i], out_str);
+      }
+      
+    }
+#endif
+
     void combineinto(combined& m) const {
         m.add(*this);
     }
@@ -241,6 +293,30 @@ public:
      static void F(V& a, V const& b) { a = b; }
      static void Init(V& a) {}
 };
+
+#ifndef MUST_REDUCE
+
+#ifdef COMM_HACKS
+
+template<typename V, template<class> class Allocator> void deserialize_from(sum_combiner<V, Allocator>& result, std::istream& in_str) {
+
+  V item;
+  deserialize_from(item, in_str);
+  result.add(item);
+
+}
+
+template<typename V, template<class> class Allocator> void deserialize_from(one_combiner<V, Allocator>& result, std::istream& in_str) {
+
+  V item;
+  deserialize_from(item, in_str);
+  result.add(item);
+
+}
+
+#endif
+
+#endif
 
 #endif /* COMBINER_H_ */
 

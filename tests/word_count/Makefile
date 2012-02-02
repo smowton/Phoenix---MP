@@ -34,8 +34,9 @@ include $(HOME)/Defines.mk
 LIBS += -L$(HOME)/$(LIB_DIR) -l$(PHOENIX)
 
 WC_OBJS := word_count.o
+WC_MP_OBJS := word_count_mp.o
 
-PROGS := word_count
+PROGS := word_count word_count_mp
 
 .PHONY: default all clean
 
@@ -43,11 +44,17 @@ default: all
 
 all: $(PROGS)
 
+word_count_mp: word_count_mp.o $(LIB_DEP)
+	$(CXX) $(CFLAGS) -o $@ $(WC_MP_OBJS) $(LIBS)
+
 word_count: $(WC_OBJS) $(LIB_DEP)
 	$(CXX) $(CFLAGS) -o $@ $(WC_OBJS) $(LIBS)
+
+word_count_mp.o: word_count.cpp
+	$(CXX) $(CFLAGS) -DCOMM_HACKS -c $< -o $@ -I$(HOME)/$(INC_DIR)
 
 %.o: %.cpp
 	$(CXX) $(CFLAGS) -c $< -o $@ -I$(HOME)/$(INC_DIR)
 
 clean:
-	rm -f $(PROGS) $(WC_OBJS)
+	rm -f $(PROGS) $(WC_OBJS) $(WC_MP_OBJS)

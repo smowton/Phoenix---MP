@@ -37,6 +37,8 @@
 #include "map_reduce.h"
 #define DEFAULT_DISP_NUM 10
 
+#include "serialize.h"
+
 // a passage from the text. The input data to the Map-Reduce
 struct wc_string {
     char* data;
@@ -56,6 +58,32 @@ struct wc_word {
     }
 };
 
+#ifdef COMM_HACKS
+
+template<> void serialize_to<wc_word>(const wc_word& val, std::ostream& o_str) {
+
+  int len = strlen(val.data);
+  serialize_to(len, o_str);
+  o_str.write(val.data, len);
+
+}
+
+template<> void deserialize_from<wc_word>(wc_word& result, std::istream& i_str) {
+
+  int len;
+  deserialize_from(len, i_str);
+  char* buf = (char*)malloc(len+1);
+  if(!buf) {
+    fprintf(stderr, "Failed to deserialize wc_word: couldn't malloc %d bytes\n", len);
+    exit(1);
+  }
+  i_str.read((char*)buf, len);
+  buf[len] = '\0';
+  result.data = buf;
+
+}
+
+#endif
 
 // a hash for the word
 struct wc_word_hash
@@ -72,9 +100,11 @@ struct wc_word_hash
 };
 
 #ifdef MUST_USE_FIXED_HASH
-class WordsMR : public MapReduceSort<WordsMR, wc_string, wc_word, uint64_t, fixed_hash_container<wc_word, uint64_t, sum_combiner, 32768, wc_word_hash
+//class WordsMR : public MapReduceSort<WordsMR, wc_string, wc_word, uint64_t, fixed_hash_container<wc_word, uint64_t, sum_combiner, 32768, wc_word_hash
+class WordsMR : public MapReduce<WordsMR, wc_string, wc_word, uint64_t, fixed_hash_container<wc_word, uint64_t, sum_combiner, 32768, wc_word_hash
 #else
-class WordsMR : public MapReduceSort<WordsMR, wc_string, wc_word, uint64_t, hash_container<wc_word, uint64_t, sum_combiner, wc_word_hash 
+//class WordsMR : public MapReduceSort<WordsMR, wc_string, wc_word, uint64_t, hash_container<wc_word, uint64_t, sum_combiner, wc_word_hash 
+class WordsMR : public MapReduce<WordsMR, wc_string, wc_word, uint64_t, hash_container<wc_word, uint64_t, sum_combiner, wc_word_hash 
 #endif
 #ifdef TBB
     , tbb::scalable_allocator
@@ -149,7 +179,7 @@ public:
         return 1;
     }
 
-    bool sort(keyval const& a, keyval const& b) const
+    static bool sort(keyval const& a, keyval const& b)
     {
         return a.val < b.val || (a.val == b.val && strcmp(a.key.data, b.key.data) > 0);
     }
@@ -226,9 +256,13 @@ int main(int argc, char *argv[])
 #endif
     printf("Wordcount: MapReduce Completed\n");
 
+    /* Inserted because we're not using SortMR */
+    std::sort(result.begin(), result.end(), WordsMR::sort);
+
     get_time (begin);
 
-    unsigned int dn = std::min(disp_num, (unsigned int)result.size());
+    //    unsigned int dn = std::min(disp_num, (unsigned int)result.size());
+    unsigned int dn = (unsigned int)result.size();
     printf("\nWordcount: Results (TOP %d of %lu):\n", dn, result.size());
     uint64_t total = 0;
     for (size_t i = 0; i < dn; i++)

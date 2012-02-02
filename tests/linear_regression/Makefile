@@ -34,8 +34,9 @@ include $(HOME)/Defines.mk
 LIBS += -L$(HOME)/$(LIB_DIR) -l$(PHOENIX)
 
 L_REG_OBJS = linear_regression.o
+L_REG_MP_OBJS = linear_regression_mp.o
 
-PROGS = linear_regression
+PROGS = linear_regression linear_regression_mp
 
 .PHONY: default all clean
 
@@ -46,8 +47,14 @@ all: $(PROGS)
 linear_regression: $(L_REG_OBJS) $(LIB_DEP)
 	$(CXX) $(CFLAGS) -o $@ $(L_REG_OBJS) $(LIBS)
 
+linear_regression_mp: $(L_REG_MP_OBJS) $(LIB_DEP)
+	$(CXX) $(CFLAGS) -o $@ $(L_REG_MP_OBJS) $(LIBS)
+
+linear_regression_mp.o: linear_regression.cpp
+	$(CXX) $(CFLAGS) -DCOMM_HACKS -c $< -o $@ -I$(HOME)/$(INC_DIR)
+
 %.o: %.cpp
 	$(CXX) $(CFLAGS) -c $< -o $@ -I$(HOME)/$(INC_DIR)
 
 clean:
-	rm -f $(PROGS) $(L_REG_OBJS)
+	rm -f $(PROGS) $(L_REG_OBJS) $(L_REG_MP_OBJS)

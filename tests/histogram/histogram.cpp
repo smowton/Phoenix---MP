@@ -44,11 +44,14 @@ struct pixel {
 };
 
 #ifdef MUST_USE_HASH
-class HistogramMR : public MapReduceSort<HistogramMR, pixel, intptr_t, uint64_t, hash_container<intptr_t, uint64_t, sum_combiner, std::tr1::hash<intptr_t>
+//class HistogramMR : public MapReduceSort<HistogramMR, pixel, intptr_t, uint64_t, hash_container<intptr_t, uint64_t, sum_combiner, std::tr1::hash<intptr_t>
+class HistogramMR : public MapReduce<HistogramMR, pixel, intptr_t, uint64_t, hash_container<intptr_t, uint64_t, sum_combiner, std::tr1::hash<intptr_t>
 #elif defined(MUST_USE_FIXED_HASH)
-class HistogramMR : public MapReduceSort<HistogramMR, pixel, intptr_t, uint64_t, fixed_hash_container<intptr_t, uint64_t, sum_combiner, 32768, std::tr1::hash<intptr_t>
+//class HistogramMR : public MapReduceSort<HistogramMR, pixel, intptr_t, uint64_t, fixed_hash_container<intptr_t, uint64_t, sum_combiner, 32768, std::tr1::hash<intptr_t>
+class HistogramMR : public MapReduce<HistogramMR, pixel, intptr_t, uint64_t, fixed_hash_container<intptr_t, uint64_t, sum_combiner, 32768, std::tr1::hash<intptr_t>
 #else
-class HistogramMR : public MapReduceSort<HistogramMR, pixel, intptr_t, uint64_t, array_container<intptr_t, uint64_t, sum_combiner, 768
+//class HistogramMR : public MapReduceSort<HistogramMR, pixel, intptr_t, uint64_t, array_container<intptr_t, uint64_t, sum_combiner, 768
+class HistogramMR : public MapReduce<HistogramMR, pixel, intptr_t, uint64_t, array_container<intptr_t, uint64_t, sum_combiner, 768
 #endif
 #ifdef TBB
     , tbb::scalable_allocator
@@ -94,6 +97,7 @@ bool test_endianess() {
     } 
 }
 
+bool comparekvs(const HistogramMR::keyval& a, const HistogramMR::keyval& b) { return a.key < b.key; }
 
 int main(int argc, char *argv[]) {
     int fd;
@@ -180,8 +184,10 @@ int main(int argc, char *argv[]) {
 
     print_time("library", begin, end);
 
-    get_time (begin);
+    /* Inserted because we're using MapReduce not MapReduceSort */
+    std::sort(result.begin(), result.end(), comparekvs);
 
+    get_time (begin);
 
     short pix_val;
     intptr_t freq;
@@ -190,11 +196,11 @@ int main(int argc, char *argv[]) {
     printf("\n\nBlue\n");
     printf("----------\n\n");
     bool red = false, green = false;
-    for (size_t i = 0; i < 10 && i < result.size(); i++)
+    for (size_t i = 0; i < result.size(); i++)
     {
         pix_val = result[i].key;
         freq = result[i].val;
-        if (freq == 0) continue;
+	if (freq == 0) continue;
         
         if (pix_val >= 256 && !green) {
             printf("\n\nGreen\n");

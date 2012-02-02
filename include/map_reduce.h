@@ -27,12 +27,18 @@
 #ifndef MAP_REDUCE_H_
 #define MAP_REDUCE_H_
 
+#include <errno.h>
 #include <assert.h>
 #include <algorithm>
 #include <vector>
 #include <queue>
 #include <limits>
 #include <cmath>
+
+#include <sys/types.h> 
+#include <sys/socket.h>
+#include <linux/un.h> // For UNIX_PATH_MAX
+#include <unistd.h>
 
 #include "stddefines.h"
 #include "processor.h"
@@ -42,6 +48,243 @@
 #include "container.h"
 #include "locality.h"
 #include "thread_pool.h"
+#include "serialize.h"
+
+void read_all(int fd, char* buf, int len) {
+
+  fd_set rfds;
+
+  while(len) {
+
+    FD_ZERO(&rfds);
+    FD_SET(fd, &rfds);
+
+    int ret = select(fd + 1, &rfds, 0, 0, 0);
+
+    if(ret == -1) {
+      if(errno == EINTR)
+	continue;
+      fprintf(stderr, "Select failed: %s\n", strerror(errno));
+      exit(1);
+    }
+    else if(ret == 0) {
+      fprintf(stderr, "Unexpected EOF reading\n");
+      exit(1);
+    }
+
+    int this_read = read(fd, buf, len);
+    if(this_read == -1) {
+      if(errno == EINTR || errno == EAGAIN)
+	continue;
+      fprintf(stderr, "Read failed: %s\n", strerror(errno));
+      exit(1);
+    }
+
+    len -= this_read;
+    buf += this_read;
+
+  }
+
+}
+
+void write_all(int fd, const char* buf, int len) {
+
+  fd_set wfds;
+
+  while(len) {
+    
+    FD_ZERO(&wfds);
+    FD_SET(fd, &wfds);
+
+    int ret = select(fd + 1, 0, &wfds, 0, 0);
+
+    if(ret == -1) {
+      if(errno == EAGAIN || errno == EINTR)
+	continue;
+      fprintf(stderr, "Select failed: %s\n", strerror(errno));
+      exit(1);
+    }
+    else if(ret == 0) {
+      fprintf(stderr, "Unexpected EOF writing\n");
+      exit(1);
+    }
+
+    int this_write = write(fd, buf, len);
+    if(this_write == -1) {
+      if(errno == EAGAIN || errno == EINTR)
+	continue;
+      fprintf(stderr, "Write failed: %s\n", strerror(errno));
+      exit(1);
+    }
+
+    len -= this_write;
+    buf += this_write;
+
+  }
+
+}
+
+void setnb(int fd) {
+
+  int flags = fcntl(fd, F_GETFL);
+  flags |= O_NONBLOCK;
+  fcntl(fd, F_SETFL, flags);
+
+}
+
+template<class FType>
+class ProcGroup {
+
+  int* sock_fds;
+  const sched_policy* policy;
+  task_queue* TaskQueue;
+  std::vector<thread_loc> fake_locs;
+  int n_procs;
+
+ public:
+
+  ProcGroup() { }
+
+  ~ProcGroup() {
+    if(sock_fds)
+      free(sock_fds);
+  }
+
+  typedef void (FType::*cb_type)(int, int);
+
+  void create(const sched_policy* p, task_queue* tq, int n, FType& cb_obj, cb_type cb) {
+    
+    policy = p;
+    TaskQueue = tq;
+    n_procs = n;
+
+    dprintf("Forking %d processes\n", n);    
+
+    for(int i = 0; i < n_procs; i++) {
+      fake_locs.push_back(thread_loc());
+      fake_locs[i].thread = i;
+      fake_locs[i].cpu = policy->thr_to_cpu(i);
+      fake_locs[i].lgrp = -1;
+    }
+
+    sock_fds = (int*)malloc(2 * n_procs * sizeof(int));
+
+    for(int i = 0; i < n_procs; i++) {
+      CHECK_ERROR(socketpair(AF_UNIX, SOCK_STREAM, 0, &(sock_fds[i*2])) == -1);
+    }
+
+    for(int i = 0; i < n_procs; i++) {
+      
+      int ret = fork();
+      if(ret == -1) {
+	fprintf(stderr, "Fork failed: %s\n", strerror(errno));
+	exit(1);
+      }
+      else if(ret == 0) {
+	for(int j = 0; j < n_procs; j++) {
+	  if(j != i)
+	    close(sock_fds[j*2 + 1]);
+	  close(sock_fds[j * 2]);
+	}
+
+	proc_bind_thread(policy->thr_to_cpu(i));
+
+	(cb_obj.*cb)(sock_fds[i*2 + 1], i);
+	exit(0);
+
+      }
+
+    }
+
+    for(int i = 0; i < n_procs; i++) {
+
+      close(sock_fds[i*2 + 1]);
+      setnb(sock_fds[i*2]);
+
+    }    
+
+  }
+
+  void process_all() {
+
+    fd_set rfds;
+    int procs_done = 0;
+
+    while(procs_done < n_procs) {
+
+      FD_ZERO(&rfds);
+
+      int max_fd = 0;
+
+      for(int i = 0; i < n_procs; i++) {
+	FD_SET(sock_fds[i * 2], &rfds);
+	max_fd = std::max(max_fd, sock_fds[i * 2]);
+      }
+
+      int selret = select(max_fd + 1, &rfds, 0, 0, 0);
+      if(selret == -1) {
+	if(errno == EINTR || errno == EAGAIN)
+	  continue;
+	else {
+	  fprintf(stderr, "Select failed: %s\n", strerror(errno));
+	  exit(1);
+	}
+      }
+
+      for(int i = 0; i < n_procs; i++) {
+	if(FD_ISSET(sock_fds[i * 2], &rfds)) {
+	  char buf;
+	  int recd = read(sock_fds[i * 2], &buf, 1);
+	  if(recd == 0) {
+	    fprintf(stderr, "Reader %d hung up!\n", i);
+	    exit(1);
+	  }
+	  else if(recd == -1 && errno == EAGAIN)
+	    continue;
+	  
+	  task_queue::task_t task;
+	  if(!TaskQueue->dequeue(task, fake_locs[i])) {
+	    dprintf("Master: task queue empty serving process %d\n", i);
+	    procs_done++;
+	  }
+	  else {
+	    write_all(sock_fds[i*2], "T", 1);
+	    write_all(sock_fds[i*2], (const char*)&task.id, sizeof(uint64_t));
+	    write_all(sock_fds[i*2], (const char*)&task.len, sizeof(uint64_t));
+	    write_all(sock_fds[i*2], (const char*)&task.data, sizeof(uint64_t));
+	    dprintf("Master: assigned proc %d task %lu\n", i, task.id);
+	  }
+	}
+      }
+
+    }
+
+  }
+
+  void dismiss() {
+
+    for(int i = 0; i < n_procs; i++) {
+
+      write_all(sock_fds[i*2], "X", 1);
+
+    }
+
+  }
+
+  void wait() {
+
+    for(int i = 0; i < n_procs; i++) {
+
+      char buf;
+      read_all(sock_fds[i*2], &buf, 1);
+
+    }
+
+  }
+
+};
+
+char coord_dir[] = "/tmp/phoenix_coord_XXXXXX";
 
 template<typename Impl, typename D, typename K, typename V, 
     class Container = hash_container<K, V, buffer_combiner> >
@@ -72,12 +315,18 @@ protected:
 
     thread_pool* threadPool;            // Thread pool.
     task_queue* taskQueue;              // Queues of tasks.
+    sched_policy const* threadPolicy;
 
     container_type container; 
     std::vector<keyval>* final_vals;    // Array to send to merge task.    
     
     uint64_t num_map_tasks;
     uint64_t num_reduce_tasks;
+
+#ifdef COMM_HACKS
+    ProcGroup<MapReduce<Impl,D,K,V,Container> > mapProcs;
+    ProcGroup<MapReduce<Impl,D,K,V,Container> > redProcs;
+#endif
 
     virtual void run_map(data_type* data, uint64_t len);
     virtual void run_reduce();
@@ -89,6 +338,11 @@ protected:
         thread_loc const& loc, double& time, double& user_time, int& tasks);
     virtual void merge_worker(
         thread_loc const& loc, double& time, double& user_time, int& tasks);
+
+#ifdef COMM_HACKS
+    void map_worker_oop(int, int);
+    void reduce_worker_oop(int, int);
+#endif
 
     // Data passed to the callback functions.
     struct thread_arg_t
@@ -146,6 +400,14 @@ public:
         // number of processors
         int threads = atoi(GETENV("MR_NUMTHREADS"));
         setThreads(threads > 0 ? threads : proc_get_num_cpus(), 0);
+
+#ifdef COMM_HACKS
+	if(!mkdtemp(coord_dir)) {
+	  fprintf(stderr, "Couldn't create a coordination directory: %s\n", strerror(errno));
+	  exit(1);
+	}
+#endif	
+
     }
 
     virtual ~MapReduce() {
@@ -156,14 +418,18 @@ public:
     // override the default thread offset and thread count.
     MapReduce& setThreads(int num_threads, sched_policy const* policy = NULL) {
         this->num_threads = (num_threads > 0) ? num_threads : this->num_threads;
-        
+
+#ifndef COMM_HACKS        
         if(this->threadPool != NULL) delete this->threadPool;
+#endif
         if(this->taskQueue != NULL) delete this->taskQueue;
 
         // Create thread pool and task queue
-        sched_policy_strand_fill default_policy(0);
-        this->threadPool = new thread_pool(
-            num_threads, policy == NULL ? &default_policy : policy);
+        //sched_policy_strand_fill default_policy(0);
+	this->threadPolicy = policy == NULL ? new sched_policy_user_defined() : policy;
+#ifndef COMM_HACKS
+        this->threadPool = new thread_pool(num_threads, threadPolicy);
+#endif
         this->taskQueue = new task_queue(num_threads, num_threads);
 
         return *this;
@@ -222,8 +488,8 @@ run (D *data, uint64_t count, std::vector<keyval>& result)
     // allocate storage
     this->num_map_tasks = std::min(count, this->num_threads) * 16;
     this->num_reduce_tasks = this->num_threads;
-    dprintf ("num_map_tasks = %d\n", num_map_tasks);
-    dprintf ("num_reduce_tasks = %d\n", num_reduce_tasks);
+    dprintf ("num_map_tasks = %lu\n", num_map_tasks);
+    dprintf ("num_reduce_tasks = %lu\n", num_reduce_tasks);
 
     container.init(this->num_threads, this->num_reduce_tasks);
     this->final_vals = new std::vector<keyval>[this->num_threads];
@@ -271,6 +537,8 @@ run_map (data_type* data, uint64_t count)
     // Compute map task chunk size
     uint64_t chunk_size = 
         std::max(1, (int)ceil((double)count / this->num_map_tasks));
+
+    dprintf("Creating map tasks with chunk size %lu, count %lu\n", chunk_size, count);
     
     // Generate tasks by splitting input data and add to queue.
     for(uint64_t i = 0; i < this->num_map_tasks; i++)
@@ -289,7 +557,28 @@ run_map (data_type* data, uint64_t count)
         }
     }
 
+#ifdef COMM_HACKS
+    
+    int n_procs = std::min(num_map_tasks, num_threads);
+    dprintf("Master: creating mapper processes\n");
+    mapProcs.create(threadPolicy, taskQueue, n_procs, *this, &MapReduce<Impl,D,K,V,Container>::map_worker_oop);
+    dprintf("Master: dispatching mapper work\n");
+    mapProcs.process_all();
+
+    // Task queue is now drained
+
+    dprintf("Master: all mapper tasks dispatched; dismiss mappers\n");
+    mapProcs.dismiss(); // Start the shuffle phase, in which the mappers send their intermediate results to reducers
+
+    dprintf("Master: create reducers\n");
+    int n_red_procs = std::min(this->num_reduce_tasks, num_threads);
+    redProcs.create(threadPolicy, taskQueue, n_red_procs, *this, &MapReduce<Impl,D,K,V,Container>::reduce_worker_oop); // Reducers will not connect to mappers until process_all is called
+    dprintf("Master: map phase complete\n");
+
+#else
     start_workers (&map_callback, std::min(num_map_tasks, num_threads), "map"); 
+#endif
+    
 }
 
 /**
@@ -316,6 +605,198 @@ map_worker(thread_loc const& loc, double& time, double& user_time, int& tasks)
     time += time_elapsed(begin);
 }
 
+#ifdef COMM_HACKS
+
+template<typename Impl, typename D, typename K, typename V, class Container>
+void MapReduce<Impl, D, K, V, Container>::
+map_worker_oop(int fd, int threadid) {
+
+  // Create a listening socket for the reducers to obtain their intermediate values.
+
+  int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if(listen_fd == -1) {
+    fprintf(stderr, "Socket: %s\n", strerror(errno));
+    exit(1);
+  }
+
+  setnb(listen_fd);
+  
+  struct sockaddr_un addr;
+  addr.sun_family = AF_UNIX;
+  int ret = snprintf(addr.sun_path, UNIX_PATH_MAX, "%s/mapper_%d_sock", coord_dir, threadid);
+  if(ret >= UNIX_PATH_MAX) {
+    fprintf(stderr, "Path prefix %s too long for sockaddr_un\n", coord_dir);
+    exit(1);
+  }
+  
+  ret = bind(listen_fd, (struct sockaddr*)&addr, sizeof(struct sockaddr_un));
+  if(ret == -1) {
+    fprintf(stderr, "Bind: %s\n", strerror(errno));
+    exit(1);
+  }
+
+  ret = listen(listen_fd, 5);
+  if(ret == -1) {
+    fprintf(stderr, "Listen: %s\n", strerror(errno));
+    exit(1);
+  }
+
+  dprintf("Listening on %s\n", addr.sun_path);
+
+  // Deserialise task_ts and handle each as it comes. When we're told we're done, start accepting reducer connections and feed each their intermediate KVs.
+
+  typename container_type::input_type t = container.get(threadid);
+  
+  while(1) {
+
+    char buf = 'R';
+    write_all(fd, &buf, 1);
+    read_all(fd, &buf, 1);
+    if(buf == 'T') {
+
+      uint64_t id;
+      uint64_t len;
+      uint64_t d;
+      read_all(fd, (char*)&id, sizeof(uint64_t));
+      read_all(fd, (char*)&len, sizeof(uint64_t));
+      read_all(fd, (char*)&d, sizeof(uint64_t));
+
+      dprintf("Dispatching work unit %lu\n", id);
+
+      for (data_type* data = (data_type*)d; 
+	   data < (data_type*)d + len; ++data) {
+	static_cast<Impl const*>(this)->map(*data, t);
+      }
+
+    }
+    else if(buf == 'X')
+      break;
+    else {
+      fprintf(stderr, "Unexpected command: %d\n", (int)buf);
+      exit(1);
+    }
+
+  }
+
+  dprintf("Mapper process dismissed; making reducer streams\n");
+
+  std::ostringstream* out_streams = new std::ostringstream[num_reduce_tasks];
+  std::ostream** out_ostreams = new std::ostream*[num_reduce_tasks];
+  for(uint64_t i = 0; i < num_reduce_tasks; ++i)
+    out_ostreams[i] = &(out_streams[i]);
+  dprintf("Mapper %d start export\n", threadid);
+  container.do_export(t, out_ostreams);
+  dprintf("Mapper %d finish export\n", threadid);
+  
+  // Send everything we've got to all reducers, say we're done, and die.
+
+  std::vector<std::string> out_strs;
+  std::vector<std::pair<int, int> > out_progress;
+
+  for(unsigned i = 0; i < num_reduce_tasks; i++) {
+    out_strs.push_back(out_streams[i].str());
+    out_progress.push_back(std::make_pair(0, -1));
+  }
+
+  delete[] out_streams;
+
+  unsigned transfers_finished = 0;
+
+  dprintf("Accepting reducer connections (expecting %lu)\n", num_reduce_tasks);
+
+  while(transfers_finished < num_reduce_tasks) {
+
+    fd_set rfds;
+    fd_set wfds;
+    int maxfd;
+    FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
+    FD_SET(listen_fd, &rfds);
+    maxfd = listen_fd;
+
+    for(unsigned i = 0; i < out_progress.size(); i++) {
+
+      std::pair<int, int>& r = out_progress[i];
+      if(r.second != -1) {
+	FD_SET(r.second, &wfds);
+	maxfd = std::max(maxfd, r.second);
+      }
+
+    }
+
+    int selret = select(maxfd + 1, &rfds, &wfds, 0, 0);
+    if(selret == -1) {
+      if(errno == EAGAIN || errno == EINTR)
+	continue;
+      fprintf(stderr, "Reducer select failure: %s\n", strerror(errno));
+      exit(1);
+    }
+
+    if(FD_ISSET(listen_fd, &rfds)) {
+
+      struct sockaddr_un otherend;
+      socklen_t otherend_len = sizeof(otherend);
+      int newfd;
+      while((newfd = accept(listen_fd, (sockaddr*)&otherend, &otherend_len)) != -1) {
+	
+	uint64_t reducer_id;
+	read_all(newfd, (char*)&reducer_id, sizeof(reducer_id));
+	dprintf("Reducer %lu connected\n", reducer_id);
+	out_progress[reducer_id].second = newfd;
+	setnb(newfd);
+	
+      }
+      if(errno != EAGAIN && errno != EINTR) {
+	fprintf(stderr, "Accept: %s\n", strerror(errno));
+	exit(1);
+      }
+
+    }
+
+    for(unsigned i = 0; i < out_progress.size(); i++) {
+
+      std::pair<int, int>& r = out_progress[i];
+
+      if(r.second != -1 && FD_ISSET(r.second, &wfds)) {
+
+	const char* read_from = out_strs[i].c_str();
+	int offset = r.first;
+	int len = out_strs[i].length();
+	int to_write = std::min(4096, len - offset);
+	if(to_write == 0) {
+	  dprintf("Closing mapper->reducer connection\n");
+	  close(r.second);
+	  r.second = -1;
+	  transfers_finished++;
+	  continue;
+	}
+
+	int written = write(r.second, read_from + offset, to_write);
+	if(written <= 0) {
+	  if(written == -1 && (errno == EAGAIN || errno == EINTR))
+	    continue;
+	  if(written == 0)
+	    fprintf(stderr, "Write to reducer %d: hung up\n", i);
+	  else
+	    fprintf(stderr, "Write to reducer %d: %s\n", i, strerror(errno));
+	  exit(1);
+	}
+	r.first += written;
+
+      }
+
+    }
+
+  }
+
+  dprintf("All reducers satisfied; mapper exiting\n");
+
+  write_all(fd, "X", 1); // Tell the master we're done
+
+}
+
+#endif
+
 /**
  * Run reduce tasks and get final values. 
  */
@@ -328,8 +809,18 @@ void MapReduce<Impl, D, K, V, Container>::run_reduce ()
         this->taskQueue->enqueue_seq(task, this->num_reduce_tasks);
     }
 
+#ifdef COMM_HACKS
+    
+    dprintf("Master: starting reducers\n");
+    redProcs.process_all(); // Reducers will start connecting to mappers and reducing, but won't contact us til we dismiss() them in run_merge
+    dprintf("Master: waiting for mapper processes\n");
+    mapProcs.wait();
+    dprintf("Master: mappers complete\n");
+
+#else
     start_workers (&reduce_callback, 
         std::min(this->num_reduce_tasks, num_threads), "reduce");
+#endif
 }
 
 /**
@@ -363,24 +854,372 @@ void MapReduce<Impl, D, K, V, Container>::reduce_worker (
     time += time_elapsed(begin);
 }
 
+void printss(std::stringstream& ss) {
+
+  int goff = ss.tellg();
+  int poff = ss.tellp();
+  int eof = ss.eof();
+  printf("Goff: %d, Poff: %d, EOF: %d\n", goff, poff, eof);
+
+}
+
+#ifdef COMM_HACKS
+
+template<typename Impl, typename D, typename K, typename V, class Container>
+void MapReduce<Impl, D, K, V, Container>::reduce_worker_oop (int fd, int threadid)
+{
+
+  while(1) {
+
+    char buf = 'R';
+    write_all(fd, &buf, 1);
+    read_all(fd, &buf, 1);
+    if(buf == 'T') {
+
+      uint64_t id;
+      uint64_t len;
+      uint64_t d;
+      read_all(fd, (char*)&id, sizeof(uint64_t)); // Only ID actually matters for reducers.
+      read_all(fd, (char*)&len, sizeof(uint64_t));
+      read_all(fd, (char*)&d, sizeof(uint64_t));
+
+      dprintf("Reducer: assigned work unit %lu; connecting to mappers\n", id);
+      
+      char buf[4096];
+
+      // Connect to all mappers (processes, not tasks) and grab their data.
+      unsigned map_streams = std::min(num_map_tasks, num_threads);
+      int* fds = new int[map_streams];
+      std::stringstream* streams = new std::stringstream[map_streams];
+
+      for(unsigned i = 0; i < map_streams; i++) {
+
+	struct sockaddr_un addr;
+	addr.sun_family = AF_UNIX;
+	int ret = snprintf(addr.sun_path, UNIX_PATH_MAX, "%s/mapper_%d_sock", coord_dir, i);
+	if(ret >= UNIX_PATH_MAX) {
+	  fprintf(stderr, "%s dirname too long\n", coord_dir);
+	  exit(1);
+	}
+	int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if(fd == -1) {
+	  fprintf(stderr, "socket: %s\n", strerror(errno));
+	  exit(1);
+	}
+
+	ret = connect(fd, (struct sockaddr*)&addr, sizeof(struct sockaddr_un));
+	if(ret == -1) {
+	  fprintf(stderr, "connect %s: %s\n", addr.sun_path, strerror(errno));
+	  exit(1);
+	}
+
+	write_all(fd, (const char*)&id, sizeof(uint64_t));
+	setnb(fd);
+	fds[i] = fd;
+
+	dprintf("Reducer %lu: connected to mapper process %d\n", id, i);
+
+      }
+
+      dprintf("Reducer %lu: receiving mapper data\n", id);
+
+      unsigned conns_done = 0;
+      while(conns_done < map_streams) {
+
+	fd_set rfds;
+	FD_ZERO(&rfds);
+
+	int maxfd = 0;
+
+	for(unsigned i = 0; i < map_streams; i++)
+	  if(fds[i] != -1) {
+	    maxfd = std::max(maxfd, fds[i]);
+	    FD_SET(fds[i], &rfds);
+	  }
+
+	int selret = select(maxfd + 1, &rfds, 0, 0, 0);
+	if(selret == -1) {
+	  if(errno == EINTR || errno == EAGAIN)
+	    continue;
+	  fprintf(stderr, "Reducer-select: %s\n", strerror(errno));
+	  exit(1);
+	}
+
+	for(unsigned i = 0; i < map_streams; i++) {
+	  if(fds[i] != -1) {
+	    int r = read(fds[i], buf, 4096);
+	    if(r == -1) {
+	      if(errno != EAGAIN) {
+		fprintf(stderr, "Reducer-read: %s\n", strerror(errno));
+		exit(1);
+	      }
+	      else {
+		continue;
+	      }
+	    }
+	    else if(r == 0) {
+	      dprintf("Reducer %lu: mapper %u: EOF\n", id, i);
+	      close(fds[i]);
+	      fds[i] = -1;
+	      conns_done++;
+	    }
+	    else {
+	      streams[i].write(buf, r);
+	    }
+	  }
+	}
+
+      }
+
+      dprintf("Reducer %lu: all data received, deserialising\n", id);
+
+      for(unsigned i = 0; i < map_streams; i++) {
+
+	container.import(i, d, streams[i]);
+
+      }
+
+      delete[] fds;
+      delete[] streams;
+
+      dprintf("Reducer %lu: reducing\n", id);
+
+      typename container_type::iterator i = container.begin(d);
+
+      K key;
+      reduce_iterator values;
+
+      while(i.next(key, values))
+        {
+	  if(values.size() > 0)
+	    static_cast<Impl const*>(this)->reduce(key, values, this->final_vals[threadid]);
+        }    
+
+      dprintf("Reducer %lu: done\n", id);
+
+    }
+    else if(buf == 'X') {
+      dprintf("Reducer: dismissed; writing to merger\n");
+      break;
+    }
+    else {
+      fprintf(stderr, "Unexpected command: %d\n", (int)buf);
+      exit(1);
+    }
+
+  }
+
+  // OK, no more reduce tasks. Connect to the main process and give it out final values.
+  
+  struct sockaddr_un addr;
+  addr.sun_family = AF_UNIX;
+  int ret = snprintf(addr.sun_path, UNIX_PATH_MAX, "%s/merger_sock", coord_dir);
+  if(ret >= UNIX_PATH_MAX) {
+    fprintf(stderr, "%s dirname too long\n", coord_dir);
+    exit(1);
+  }
+  int final_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if(final_fd == -1) {
+    fprintf(stderr, "socket: %s\n", strerror(errno));
+    exit(1);
+  }
+
+  ret = connect(final_fd, (struct sockaddr*)&addr, sizeof(struct sockaddr_un));
+  if(ret == -1) {
+    fprintf(stderr, "connect %s: %s\n", addr.sun_path, strerror(errno));
+    exit(1);
+  }
+
+  dprintf("Reducer: connected to merger\n");
+
+  std::stringstream final_str;
+
+  final_str.write((const char*)&threadid, sizeof(int));
+  unsigned int n_kvs = final_vals[threadid].size();
+  final_str.write((const char*)&n_kvs, sizeof(n_kvs));
+
+  for(unsigned i = 0; i < n_kvs; i++) {
+
+    serialize_to(final_vals[threadid][i].key, final_str);
+    serialize_to(final_vals[threadid][i].val, final_str);
+
+  }
+
+  std::string final_s = final_str.str();
+
+  write_all(final_fd, final_s.c_str(), final_s.length());
+  close(final_fd);
+
+  dprintf("Reducer: done writing to merger; exit\n");
+
+  write_all(fd, "X", 1);
+  close(fd);
+
+}
+
+#endif
+
 /**
  * Merge all reduced data 
  */
 template<typename Impl, typename D, typename K, typename V, class Container>
 void MapReduce<Impl, D, K, V, Container>::run_merge ()
 {
+
+    std::vector<keyval>* final = new std::vector<keyval>[1];
+
+#ifndef COMM_HACKS
     size_t total = 0;
     for(size_t i = 0; i < num_threads; i++) {
         total += this->final_vals[i].size();
     }
 
-    std::vector<keyval>* final = new std::vector<keyval>[1];
     final[0].reserve(total);
 
     for(size_t i = 0; i < num_threads; i++) {
         final[0].insert(final[0].end(), this->final_vals[i].begin(), 
             this->final_vals[i].end());
     }
+#else
+
+    int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if(listen_fd == -1) {
+      fprintf(stderr, "Socket: %s\n", strerror(errno));
+      exit(1);
+    }
+
+    setnb(listen_fd);
+  
+    struct sockaddr_un addr;
+    addr.sun_family = AF_UNIX;
+    int ret = snprintf(addr.sun_path, UNIX_PATH_MAX, "%s/merger_sock", coord_dir);
+    if(ret >= UNIX_PATH_MAX) {
+      fprintf(stderr, "Path prefix %s too long for sockaddr_un\n", coord_dir);
+      exit(1);
+    }
+  
+    ret = bind(listen_fd, (const sockaddr*)&addr, sizeof(struct sockaddr_un));
+    if(ret == -1) {
+      fprintf(stderr, "Bind: %s\n", strerror(errno));
+      exit(1);
+    }
+
+    ret = listen(listen_fd, 5);
+    if(ret == -1) {
+      fprintf(stderr, "Listen: %s\n", strerror(errno));
+      exit(1);
+    }
+
+    dprintf("Master: accepting merge connections; dismissing reducers\n");
+
+    redProcs.dismiss(); // Asks the reducers to start connecting to us
+
+    unsigned red_procs = std::min(this->num_reduce_tasks, num_threads);
+    unsigned procs_done = 0;
+
+    std::pair<std::stringstream, int>* conns = new std::pair<std::stringstream, int>[red_procs];
+    for(unsigned i = 0; i < red_procs; i++) {
+      conns[i].second = -1;
+    }
+
+    while(procs_done < red_procs) {
+
+      char buf[4096];
+      fd_set rfds;
+      int maxfd;
+      FD_ZERO(&rfds);
+      FD_SET(listen_fd, &rfds);
+      maxfd = listen_fd;
+
+      for(unsigned i = 0; i < red_procs; i++) {
+
+	std::pair<std::stringstream, int>& r = conns[i];
+	if(r.second != -1) {
+	  FD_SET(r.second, &rfds);
+	  maxfd = std::max(maxfd, r.second);
+	}
+
+      }
+
+      int selret = select(maxfd + 1, &rfds, 0, 0, 0);
+      if(selret == -1) {
+	if(errno == EAGAIN || errno == EINTR)
+	  continue;
+	fprintf(stderr, "Merger select failure: %s\n", strerror(errno));
+	exit(1);
+      }
+
+      if(FD_ISSET(listen_fd, &rfds)) {
+
+	struct sockaddr_un otherend;
+	socklen_t otherend_len = sizeof(otherend);
+	int newfd;
+	while((newfd = accept(listen_fd, (sockaddr*)&otherend, &otherend_len)) != -1) {
+	
+	  int reducer_thread;
+	  read_all(newfd, (char*)&reducer_thread, sizeof(int));
+	  dprintf("Reducer %d connected to merger\n", reducer_thread);
+
+	  setnb(newfd);
+	  conns[reducer_thread].second = newfd;
+	
+	}
+	if(errno != EAGAIN && errno != EINTR) {
+	  fprintf(stderr, "Accept: %s\n", strerror(errno));
+	  exit(1);
+	}
+
+      }
+
+      for(unsigned i = 0; i < red_procs; i++) {
+
+	if(conns[i].second != -1 && FD_ISSET(conns[i].second, &rfds)) {
+	  int r = read(conns[i].second, buf, 4096);
+	  if(r == 0) {
+	    dprintf("Master: receive from reducer %u complete\n", i);
+	    close(conns[i].second);
+	    conns[i].second = -1;
+	    procs_done++;
+	  }
+	  else if(r == -1) {
+	    if(errno != EAGAIN && errno != EINTR) {
+	      fprintf(stderr, "Merger read: %s\n", strerror(errno));
+	      exit(1);
+	    }
+	    continue;
+	  }
+	  else {
+	    conns[i].first.write(buf, r);
+	  }
+	}
+
+      }
+
+    }
+
+    dprintf("Master: all reducer data received; merging\n");
+
+    for(unsigned i = 0; i < red_procs; i++) {
+
+      std::stringstream& s = conns[i].first;
+      unsigned int n_kvs = 0;
+      s.read((char*)&n_kvs, sizeof(n_kvs));
+      for(unsigned int j = 0; j < n_kvs; j++) {
+	key_type k;
+	deserialize_from(k, s);
+	value_type v;
+	deserialize_from(v, s);
+	keyval kv = {k, v};
+	final[0].push_back(kv);
+      }
+
+    }
+
+    dprintf("Master: merge complete\n");
+
+    delete[] conns;
+
+#endif
 
     delete [] this->final_vals;
     this->final_vals = final;
