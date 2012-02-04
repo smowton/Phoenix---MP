@@ -402,12 +402,8 @@ public:
         setThreads(threads > 0 ? threads : proc_get_num_cpus(), 0);
 
 #ifdef COMM_HACKS
-	if(!mkdtemp(coord_dir)) {
-	  fprintf(stderr, "Couldn't create a coordination directory: %s\n", strerror(errno));
-	  exit(1);
-	}
+	fable_init();
 #endif	
-
     }
 
     virtual ~MapReduce() {
@@ -613,35 +609,12 @@ map_worker_oop(int fd, int threadid) {
 
   // Create a listening socket for the reducers to obtain their intermediate values.
 
-  int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if(listen_fd == -1) {
-    fprintf(stderr, "Socket: %s\n", strerror(errno));
-    exit(1);
-  }
+  char sock_name[256];
+  int ret = snprintf(sock_name, 256, "mapper_%d_sock", threadid);
+  CHECK_ERROR((ret >= 256));
 
-  setnb(listen_fd);
-  
-  struct sockaddr_un addr;
-  addr.sun_family = AF_UNIX;
-  int ret = snprintf(addr.sun_path, UNIX_PATH_MAX, "%s/mapper_%d_sock", coord_dir, threadid);
-  if(ret >= UNIX_PATH_MAX) {
-    fprintf(stderr, "Path prefix %s too long for sockaddr_un\n", coord_dir);
-    exit(1);
-  }
-  
-  ret = bind(listen_fd, (struct sockaddr*)&addr, sizeof(struct sockaddr_un));
-  if(ret == -1) {
-    fprintf(stderr, "Bind: %s\n", strerror(errno));
-    exit(1);
-  }
-
-  ret = listen(listen_fd, 5);
-  if(ret == -1) {
-    fprintf(stderr, "Listen: %s\n", strerror(errno));
-    exit(1);
-  }
-
-  dprintf("Listening on %s\n", addr.sun_path);
+  void* listen_handle = fable_listen(sock_name, CONNTYPE_UNIXDOMAIN);
+  fable_set_nonblocking(listen_handle);
 
   // Deserialise task_ts and handle each as it comes. When we're told we're done, start accepting reducer connections and feed each their intermediate KVs.
 
@@ -680,7 +653,7 @@ map_worker_oop(int fd, int threadid) {
 
   dprintf("Mapper process dismissed; making reducer streams\n");
 
-  std::ostringstream* out_streams = new std::ostringstream[num_reduce_tasks];
+  std::stringstream* out_streams = new std::ostringstream[num_reduce_tasks];
   std::ostream** out_ostreams = new std::ostream*[num_reduce_tasks];
   for(uint64_t i = 0; i < num_reduce_tasks; ++i)
     out_ostreams[i] = &(out_streams[i]);
@@ -690,15 +663,10 @@ map_worker_oop(int fd, int threadid) {
   
   // Send everything we've got to all reducers, say we're done, and die.
 
-  std::vector<std::string> out_strs;
-  std::vector<std::pair<int, int> > out_progress;
+  std::vector<void*> out_handles;
 
-  for(unsigned i = 0; i < num_reduce_tasks; i++) {
-    out_strs.push_back(out_streams[i].str());
-    out_progress.push_back(std::make_pair(0, -1));
-  }
-
-  delete[] out_streams;
+  for(unsigned i = 0; i < num_reduce_tasks; i++)
+    out_handles.push_back((void*)0);
 
   unsigned transfers_finished = 0;
 
@@ -708,70 +676,62 @@ map_worker_oop(int fd, int threadid) {
 
     fd_set rfds;
     fd_set wfds;
-    int maxfd;
+    fd_set efds;
+    struct timeval timeout;
+    timeout.tv_sec = LONG_MAX;
+    timeout.tv_usec = LONG_MAX;
+    int maxfd = 0;
     FD_ZERO(&rfds);
     FD_ZERO(&wfds);
-    FD_SET(listen_fd, &rfds);
-    maxfd = listen_fd;
+    FD_ZERO(&efds);
+
+    fable_get_select_fds(FABLE_SELECT_ACCEPT, &maxfd, &rfds, &wfds, &efds, &timeout);
 
     for(unsigned i = 0; i < out_progress.size(); i++) {
 
-      std::pair<int, int>& r = out_progress[i];
-      if(r.second != -1) {
-	FD_SET(r.second, &wfds);
-	maxfd = std::max(maxfd, r.second);
-      }
+      void* handle = out_handles[i];
+      if(handle)
+	fable_get_select_fds(FABLE_SELECT_WRITE, handle, &maxfd, &rfds, &wfds, &efds, &timeout);
 
     }
 
-    int selret = select(maxfd + 1, &rfds, &wfds, 0, 0);
-    if(selret == -1) {
-      if(errno == EAGAIN || errno == EINTR)
-	continue;
-      fprintf(stderr, "Reducer select failure: %s\n", strerror(errno));
-      exit(1);
-    }
+    int selret = select(maxfd, &rfds, &wfds, &efds, &timeout);
+    CHECK_ERROR((selret == -1 && errno != EAGAIN && errno != EINTR));
+    if(selret == -1)
+      continue;
 
-    if(FD_ISSET(listen_fd, &rfds)) {
+    if(fable_ready(FABLE_SELECT_ACCEPT, listen_handle, &rfds, &wfds, &efds)) {
 
-      struct sockaddr_un otherend;
-      socklen_t otherend_len = sizeof(otherend);
-      int newfd;
-      while((newfd = accept(listen_fd, (sockaddr*)&otherend, &otherend_len)) != -1) {
+      void* new_handle;
+      while((new_handle = accept(listen_handle))) {
 	
 	uint64_t reducer_id;
-	read_all(newfd, (char*)&reducer_id, sizeof(reducer_id));
+	read_all_fable(new_handle, (char*)&reducer_id, sizeof(reducer_id));
 	dprintf("Reducer %lu connected\n", reducer_id);
-	out_progress[reducer_id].second = newfd;
-	setnb(newfd);
+	out_handles[reducer_id] = new_handle;
+	fable_set_nonblocking(new_handle);
 	
       }
-      if(errno != EAGAIN && errno != EINTR) {
-	fprintf(stderr, "Accept: %s\n", strerror(errno));
-	exit(1);
-      }
+      CHECK_ERROR((errno != EAGAIN && errno != EINTR));
 
     }
 
     for(unsigned i = 0; i < out_progress.size(); i++) {
 
-      std::pair<int, int>& r = out_progress[i];
+      void* handle = out_handles[i];
 
-      if(r.second != -1 && FD_ISSET(r.second, &wfds)) {
+      if(handle && fable_ready(FABLE_SELECT_READ, handle, &rfds, &wfds, &efds)) {
 
-	const char* read_from = out_strs[i].c_str();
-	int offset = r.first;
-	int len = out_strs[i].length();
-	int to_write = std::min(4096, len - offset);
+ 	int to_write = std::min(4096, out_streams[i].rdbuf()->in_avail());
 	if(to_write == 0) {
 	  dprintf("Closing mapper->reducer connection\n");
-	  close(r.second);
-	  r.second = -1;
+	  fable_close(handle);
+	  out_handles[i] = 0;
 	  transfers_finished++;
 	  continue;
 	}
 
-	int written = write(r.second, read_from + offset, to_write);
+	int written = fable_write(r.second, read_from + offset, to_write);
 	if(written <= 0) {
 	  if(written == -1 && (errno == EAGAIN || errno == EINTR))
 	    continue;
@@ -788,6 +748,8 @@ map_worker_oop(int fd, int threadid) {
     }
 
   }
+
+  delete[] out_streams;
 
   dprintf("All reducers satisfied; mapper exiting\n");
 
