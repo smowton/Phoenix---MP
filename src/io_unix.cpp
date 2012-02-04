@@ -1,10 +1,30 @@
 
 #include "stddefines.h"
 #include "io_helpers.h"
+#include "fable.h"
+
+#include <errno.h>
+#include <stdlib.h>
 
 char coord_dir[] = "/tmp/phoenix_coord_XXXXXX";
 char fable_unix_buf[4096];
-struct iovec vec;
+
+#define MAX_UNIX_BUF (4096 - (sizeof(struct fable_buf) + sizeof(struct iovec)))
+
+struct fable_buf_unix {
+
+  struct fable_buf base;
+  struct iovec unix_vec;
+  char mem[MAX_UNIX_BUF];
+
+} __attribute__((packed));
+
+struct fable_buf_unix_lent {
+
+  struct fable_buf base;
+  struct iovec unix_vec;
+
+} __attribute__((packed));
 
 void fable_init_unix() {
 
@@ -77,17 +97,62 @@ int fable_ready_unix(int type, void* handle, fd_set* rfds, fd_set* wfds, fd_set*
 
 }
 
-struct iovec* fable_get_write_buf_unix(void* handle, int len, int* nvecs) {
+struct fable_buf* fable_get_write_buf_unix(void* handle, int len) {
 
-  vec.iov_buf = fable_unix_buf;
-  vec.iov_len = len < 4096 ? len : 4096;
-  *nvecs = 1;
-  return &vec;
+  struct fable_buf_unix* new_buf = (struct fable_buf_unix*)malloc(sizeof(struct fable_buf_unix));
+  new_buf->base.bufs = &new_buf->unix_vec;
+  new_buf->base.nbufs = 1;
+  new_buf->base.written = 0;
+  new_buf->unix_vec.iov_len = len < MAX_UNIX_BUF ? len : MAX_UNIX_BUF;
+  new_buf->unix_vec.iov_base = &(new_buf->mem[0]);
+
+  return &(new_buf->base);
 
 }
 
-int fable_release_write_buf_unix(void* handle, struct iovec* buf, int nvecs) {
+struct fable_buf* fable_lend_write_buf_unix(void* handle, char* buf, int len) {
 
+  struct fable_buf_unix_lent* new_buf = (struct fable_buf_unix_lent*)malloc(sizeof(struct fable_buf_unix_lent));
+  new_buf->base.bufs = &new_buf->unix_vec;
+  new_buf->base.nbufs = 1;
+  new_buf->base.written = 0;
+  new_buf->unix_vec.iov_base = buf;
+  new_buf->unix_vec.iov_len = len;
   
+  return &(new_buf->base);
+
+}
+
+int fable_release_write_buf_unix(void* handle, struct fable_buf* buf) {
+
+  int fd = (int)handle;
+
+  int remaining_write = buf->vecs[0].iov_len - buf->written;
+  int write_ret = write(fd, ((char*)buf->vecs[0].iov_base) + buf->written, remaining_write);
+
+  // Freeing buf should be safe as it's the first member of struct fable_buf_unix.
+  if(write_ret == -1) {
+    if(errno == EAGAIN || errno == EINTR) {
+      errno = EAGAIN;
+      return -1;
+    }
+    else {
+      free(buf);
+      return -1;
+    }
+  }
+  else if(write_ret == 0) {
+    free(buf);
+    return 0;
+  }
+  else if(write_ret < remaining_write) {
+    errno = EAGAIN;
+    buf->written += write_ret;
+    return -1;
+  }
+  else {
+    free(buf);
+    return 1;
+  }
 
 }
