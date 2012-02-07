@@ -1,4 +1,12 @@
 
+#include <sys/select.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+
 #include "io_helpers.h"
 
 void read_all_fd(int fd, char* buf, int len) {

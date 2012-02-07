@@ -37,8 +37,9 @@
 
 #include <sys/types.h> 
 #include <sys/socket.h>
-#include <linux/un.h> // For UNIX_PATH_MAX
+
 #include <unistd.h>
+#include <limits.h>
 
 #include "stddefines.h"
 #include "processor.h"
@@ -120,7 +121,7 @@ class ProcGroup {
     for(int i = 0; i < n_procs; i++) {
 
       close(sock_fds[i*2 + 1]);
-      setnb(sock_fds[i*2]);
+      setnb_fd(sock_fds[i*2]);
 
     }    
 
@@ -204,8 +205,6 @@ class ProcGroup {
   }
 
 };
-
-char coord_dir[] = "/tmp/phoenix_coord_XXXXXX";
 
 template<typename Impl, typename D, typename K, typename V, 
     class Container = hash_container<K, V, buffer_combiner> >
@@ -534,7 +533,7 @@ map_worker_oop(int fd, int threadid) {
   int ret = snprintf(sock_name, 256, "mapper_%d_sock", threadid);
   CHECK_ERROR((ret >= 256));
 
-  void* listen_handle = fable_listen(sock_name, CONNTYPE_UNIXDOMAIN);
+  void* listen_handle = fable_listen(sock_name);
   fable_set_nonblocking(listen_handle);
 
   // Deserialise task_ts and handle each as it comes. When we're told we're done, start accepting reducer connections and feed each their intermediate KVs.
@@ -574,7 +573,7 @@ map_worker_oop(int fd, int threadid) {
 
   dprintf("Mapper process dismissed; making reducer streams\n");
 
-  std::stringstream* out_streams = new std::ostringstream[num_reduce_tasks];
+  std::stringstream* out_streams = new std::stringstream[num_reduce_tasks];
   std::ostream** out_ostreams = new std::ostream*[num_reduce_tasks];
   for(uint64_t i = 0; i < num_reduce_tasks; ++i)
     out_ostreams[i] = &(out_streams[i]);
@@ -584,7 +583,7 @@ map_worker_oop(int fd, int threadid) {
   
   // Send everything we've got to all reducers, say we're done, and die.
 
-  std::vector<std::pair<void*, struct fable_buf*> out_handles;
+  std::vector<std::pair<void*, struct fable_buf*> > out_handles;
 
   for(unsigned i = 0; i < num_reduce_tasks; i++)
     out_handles.push_back(std::make_pair((void*)0, (struct fable_buf*)0));
@@ -608,7 +607,7 @@ map_worker_oop(int fd, int threadid) {
 
     fable_get_select_fds(listen_handle, FABLE_SELECT_ACCEPT, &maxfd, &rfds, &wfds, &efds, &timeout);
 
-    for(unsigned i = 0; i < out_progress.size(); i++) {
+    for(unsigned i = 0; i < out_handles.size(); i++) {
 
       void* handle = out_handles[i].first;
       if(handle)
@@ -624,10 +623,10 @@ map_worker_oop(int fd, int threadid) {
     if(fable_ready(listen_handle, FABLE_SELECT_ACCEPT, &rfds, &wfds, &efds)) {
 
       void* new_handle;
-      while((new_handle = accept(listen_handle))) {
+      while((new_handle = fable_accept(listen_handle))) {
 	
 	uint64_t reducer_id;
-	read_all_fable(new_handle, (char*)&reducer_id, sizeof(reducer_id));
+	fable_read_all(new_handle, (char*)&reducer_id, sizeof(reducer_id));
 	dprintf("Reducer %lu connected\n", reducer_id);
 	out_handles[reducer_id].first = new_handle;
 	fable_set_nonblocking(new_handle);
@@ -637,15 +636,18 @@ map_worker_oop(int fd, int threadid) {
 
     }
 
-    for(unsigned i = 0; i < out_progress.size(); i++) {
+    for(unsigned i = 0; i < out_handles.size(); i++) {
 
       void* handle = out_handles[i].first;
 
       if(handle && fable_ready(handle, FABLE_SELECT_WRITE, &rfds, &wfds, &efds)) {
 
 	if(!out_handles[i].second) {
-
-	  int to_write = std::min(4096, out_streams[i].rdbuf()->in_avail());
+	  
+	  // Is this really the best way to find out how many bytes are really in a stringstream?
+	  // It appears so; all the other possibilities like in_avail coyly return the highly conservative '1'
+	  // and continue to do so after underflow, representing the idea that I might write more later. Grr.
+	  int to_write = std::min(std::streamoff(4096), out_streams[i].tellp() - out_streams[i].tellg());
 
 	  if(to_write == 0) {
 	    dprintf("Closing mapper->reducer connection\n");
@@ -663,12 +665,12 @@ map_worker_oop(int fd, int threadid) {
 
 	  out_handles[i].second = buf;
 
-	  for(int i = 0; i < buf->nvecs; i++)
-	    out_streams[i].read(buf->vecs[i].iov_base, buf->vecs[i].iov_len);
+	  for(int i = 0; i < buf->nbufs; i++)
+	    out_streams[i].read((char*)buf->bufs[i].iov_base, buf->bufs[i].iov_len);
 
 	}
 
-	int written = fable_release_write_buf(handle, buf);
+	int written = fable_release_write_buf(handle, out_handles[i].second);
 	
 	if(written <= 0) {
 	  if(written == -1 && (errno == EAGAIN))
@@ -790,7 +792,7 @@ void MapReduce<Impl, D, K, V, Container>::reduce_worker_oop (int fd, int threadi
       unsigned map_streams = std::min(num_map_tasks, num_threads);
       void** handles = new void*[map_streams];
       std::stringstream* sstreams = new std::stringstream[map_streams];
-      std::ostream** streams = new std::ostream*[map_streams];
+      std::ostream** ostreams = new std::ostream*[map_streams];
 
       for(unsigned i = 0; i < map_streams; i++) {
 
@@ -802,7 +804,7 @@ void MapReduce<Impl, D, K, V, Container>::reduce_worker_oop (int fd, int threadi
 	fable_write_all(handle, (const char*)&id, sizeof(uint64_t));
 	fable_set_nonblocking(handle);
 	handles[i] = handle;
-	streams[i] = &sstreams[i];
+	ostreams[i] = &sstreams[i];
 
 	dprintf("Reducer %lu: connected to mapper process %d\n", id, i);
 
@@ -810,18 +812,18 @@ void MapReduce<Impl, D, K, V, Container>::reduce_worker_oop (int fd, int threadi
 
       dprintf("Reducer %lu: receiving mapper data\n", id);
 
-      fable_read_all_multi(handles, streams, map_streams);
+      fable_read_all_multi(handles, ostreams, map_streams);
 
        dprintf("Reducer %lu: all data received, deserialising\n", id);
 
       for(unsigned i = 0; i < map_streams; i++) {
 
-	container.import(i, d, streams[i]);
+	container.import(i, d, (sstreams[i]));
 
       }
 
       delete[] handles;
-      delete[] streams;
+      delete[] ostreams;
       delete[] sstreams;
 
       dprintf("Reducer %lu: reducing\n", id);
@@ -919,7 +921,7 @@ void MapReduce<Impl, D, K, V, Container>::run_merge ()
     std::stringstream* sstreams = new std::stringstream[red_procs];
     std::ostream** streams = new std::ostream*[red_procs];
 
-    for(int i = 0; i < red_procs; ++i) {
+    for(unsigned i = 0; i < red_procs; ++i) {
 
       void* new_handle = fable_accept(listen_handle);
       CHECK_ERROR((!new_handle));

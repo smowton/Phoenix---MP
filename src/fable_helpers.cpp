@@ -1,4 +1,10 @@
 
+#include <errno.h>
+#include <sys/select.h>
+#include <limits.h>
+
+#include <ostream>
+
 #include "stddefines.h"
 #include "fable.h"
 #include "fable_helpers.h"
@@ -45,8 +51,8 @@ void fable_read_all(void* handle, char* buf, int len) {
 
 void fable_write_all(void* handle, const char* buf, int len) {
 
-  struct fable_buf* buf = fable_lend_write_buf(handle, buf, len);
-  CHECK_ERROR((!buf));
+  struct fable_buf* fbuf = fable_lend_write_buf(handle, buf, len);
+  CHECK_ERROR((!fbuf));
 
   while(1) {
 
@@ -72,8 +78,8 @@ void fable_write_all(void* handle, const char* buf, int len) {
 
     if(fable_ready(handle, FABLE_SELECT_WRITE, &rfds, &wfds, &efds)) {
 
-      int ret = fable_release_write_buf(handle, buf);
-      if(ret == -1 && errno == EAGAIN || errno == EINTR)
+      int ret = fable_release_write_buf(handle, fbuf);
+      if(ret == -1 && (errno == EAGAIN || errno == EINTR))
 	continue;
       CHECK_ERROR((ret <= 0));
       // Otherwise, the buffer is free, we're done.
@@ -86,7 +92,7 @@ void fable_write_all(void* handle, const char* buf, int len) {
 }
 
 // Reads everything the handles have to give into their corresponding streams.
-void fable_read_all_multi(void** handles, std::ostream** streams, int nstreams) {
+void fable_read_all_multi(void** handles, std::ostream** streams, unsigned int nstreams) {
 
   // Handles start all non-zero, connected for reading, non-blocking.
 
@@ -107,7 +113,7 @@ void fable_read_all_multi(void** handles, std::ostream** streams, int nstreams) 
 
     for(unsigned i = 0; i < nstreams; i++)
       if(handles[i])
-	fable_get_select_fds(handles[i], &maxfd, &rfds, &wfds, &efds, &timeout);
+	fable_get_select_fds(handles[i], FABLE_SELECT_READ, &maxfd, &rfds, &wfds, &efds, &timeout);
 
     int selret = select(maxfd, &rfds, &wfds, &efds, &timeout);
     if(selret == -1) {
@@ -129,8 +135,8 @@ void fable_read_all_multi(void** handles, std::ostream** streams, int nstreams) 
 	  continue;
 	}
 	else {
-	  for(int i = 0; i < buf->nvecs; ++i)
-	    streams[i]->write(buf->vecs[i].iov_base, buf->vecs[i].iov_len);
+	  for(int j = 0; j < buf->nbufs; ++j)
+	    streams[i]->write((const char*)buf->bufs[j].iov_base, buf->bufs[j].iov_len);
 	  fable_release_read_buf(handles[i], buf);
 	}
       }
