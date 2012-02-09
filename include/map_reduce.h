@@ -665,8 +665,8 @@ map_worker_oop(int fd, int threadid) {
 
 	  out_handles[i].second = buf;
 
-	  for(int i = 0; i < buf->nbufs; i++)
-	    out_streams[i].read((char*)buf->bufs[i].iov_base, buf->bufs[i].iov_len);
+	  for(int j = 0; j < buf->nbufs; j++)
+	    out_streams[i].read((char*)buf->bufs[j].iov_base, buf->bufs[j].iov_len);
 
 	}
 

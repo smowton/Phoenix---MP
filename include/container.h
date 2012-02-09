@@ -209,6 +209,7 @@ public:
 
       char c;
       iss.read(&c, 1);
+      assert(!iss.eof());
       while(c == 'R') {
 	K key;
 	Combiner<V, Allocator> value;
@@ -216,6 +217,7 @@ public:
 	deserialize_from(value, iss);
 	vals[reducer_index * in_size + mapper_index].push_back(std::make_pair(key, value));
 	iss.read(&c, 1);
+	assert(!iss.eof());
       }
       assert(c == 'X');
 

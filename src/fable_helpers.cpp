@@ -131,7 +131,8 @@ void fable_read_all_multi(void** handles, std::ostream** streams, unsigned int n
 	    handles[i] = 0;
 	    conns_done++;
 	  }
-	  CHECK_ERROR((errno != EAGAIN && errno != EINTR));
+	  else
+	    CHECK_ERROR((errno != EAGAIN && errno != EINTR));
 	  continue;
 	}
 	else {
