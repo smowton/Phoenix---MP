@@ -130,7 +130,7 @@ int fable_ready_unixdomain(void* handle, int type, fd_set* rfds, fd_set* wfds, f
 
 }
 
-struct fable_buf* fable_get_write_buf_unixdomain(void* handle, int len) {
+struct fable_buf* fable_get_write_buf_unixdomain(void* handle, unsigned len) {
 
   int malloc_sz = sizeof(struct fable_buf_unix) + len;
   if(malloc_sz > 4096) {
@@ -149,7 +149,7 @@ struct fable_buf* fable_get_write_buf_unixdomain(void* handle, int len) {
 
 }
 
-struct fable_buf* fable_lend_write_buf_unixdomain(void* handle, const char* buf, int len) {
+struct fable_buf* fable_lend_write_buf_unixdomain(void* handle, const char* buf, unsigned len) {
 
   struct fable_buf_unix* new_buf = (struct fable_buf_unix*)malloc(sizeof(struct fable_buf_unix));
   new_buf->base.bufs = &new_buf->unix_vec;
@@ -196,14 +196,14 @@ int fable_release_write_buf_unixdomain(void* handle, struct fable_buf* buf) {
 
 }
 
-int fable_lend_read_buf_unixdomain(void* handle, char* buf, int len) {
+int fable_lend_read_buf_unixdomain(void* handle, char* buf, unsigned len) {
 
   int fd = *((int*)handle);
   return read(fd, buf, len);
 
 }
 
-struct fable_buf* fable_get_read_buf_unixdomain(void* handle, int len) {
+struct fable_buf* fable_get_read_buf_unixdomain(void* handle, unsigned len) {
 
   int malloc_sz = sizeof(struct fable_buf_unix) + len;
   if(malloc_sz > 4096) {

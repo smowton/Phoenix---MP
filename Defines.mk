@@ -38,7 +38,7 @@ ifeq ($(OSTYPE),Linux)
 OS = -D_LINUX_
 DEBUG = -g
 #NUMA = -DNUMA_SUPPORT
-CFLAGS = $(DEBUG) -Wall -O3 $(OS) $(NUMA) -DMMAP_POPULATE -fstrict-aliasing -Wstrict-aliasing -DFABLE_TYPE=unixdomain
+CFLAGS = $(DEBUG) -Wall -O3 $(OS) $(NUMA) -DMMAP_POPULATE -fno-strict-aliasing -DFABLE_TYPE=shmem_pipe
 LIBS = -lpthread -lrt
 endif
 

@@ -1,4 +1,6 @@
 
+#include <sys/types.h>
+#include <sys/socket.h>
 #include <sys/select.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -93,14 +95,16 @@ void setnb_fd(int fd) {
 
 int unix_send_fd(int sockfd, int sendfd) {
 
-  char control[CMSG_SPACE(CMESG_LEN(sizeof(sendfd)))];
+  char control[CMSG_SPACE(CMSG_LEN(sizeof(sendfd)))];
   struct msghdr msg;
   struct cmsghdr *cmsg;
   struct iovec iov;
 
   memset(&msg, 0, sizeof(msg));
-  msg.msg_iov = "FD";
-  msg.msg_iovlen = 2;
+  iov.iov_base = (void*)"FD";
+  iov.iov_len = 2;
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
   msg.msg_control = control;
   msg.msg_controllen = sizeof(control);
   
@@ -116,15 +120,17 @@ int unix_send_fd(int sockfd, int sendfd) {
 
 int unix_recv_fd(int sockfd) {
 
-  char control[CMSG_SPACE(CMESG_LEN(sizeof(int)))];
+  char control[CMSG_SPACE(CMSG_LEN(sizeof(int)))];
   struct msghdr msg;
   struct cmsghdr *cmsg;
   struct iovec iov;
   char databuf[2];
 
   memset(&msg, 0, sizeof(msg));
-  msg.msg_iov = databuf;
-  msg.msg_iovlen = 2;
+  iov.iov_base = databuf;
+  iov.iov_len = 2;
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
   msg.msg_control = control;
   msg.msg_controllen = sizeof(control);
 
@@ -146,5 +152,7 @@ int unix_recv_fd(int sockfd) {
       return *(int *) CMSG_DATA(cmsg);
     cmsg = CMSG_NXTHDR(&msg, cmsg);
   }
+
+  return -1;
 
 }

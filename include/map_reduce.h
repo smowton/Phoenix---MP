@@ -623,7 +623,7 @@ map_worker_oop(int fd, int threadid) {
     if(fable_ready(listen_handle, FABLE_SELECT_ACCEPT, &rfds, &wfds, &efds)) {
 
       void* new_handle;
-      while((new_handle = fable_accept(listen_handle))) {
+      while((new_handle = fable_accept(listen_handle, FABLE_DIRECTION_RECEIVE))) {
 	
 	uint64_t reducer_id;
 	fable_read_all(new_handle, (char*)&reducer_id, sizeof(reducer_id));
@@ -799,7 +799,7 @@ void MapReduce<Impl, D, K, V, Container>::reduce_worker_oop (int fd, int threadi
 	char namebuf[128];
 	int ret = snprintf(namebuf, 128, "mapper_%d_sock", i);
 	CHECK_ERROR((ret >= 128));
-        void* handle = fable_connect(namebuf);
+        void* handle = fable_connect(namebuf, FABLE_DIRECTION_RECEIVE);
 
 	fable_write_all(handle, (const char*)&id, sizeof(uint64_t));
 	fable_set_nonblocking(handle);
@@ -855,7 +855,7 @@ void MapReduce<Impl, D, K, V, Container>::reduce_worker_oop (int fd, int threadi
 
   // OK, no more reduce tasks. Connect to the main process and give it out final values.
 
-  void* out_handle = fable_connect("merger_sock");
+  void* out_handle = fable_connect("merger_sock", FABLE_DIRECTION_SEND);
   CHECK_ERROR(!out_handle);
 
   dprintf("Reducer: connected to merger\n");
@@ -923,7 +923,7 @@ void MapReduce<Impl, D, K, V, Container>::run_merge ()
 
     for(unsigned i = 0; i < red_procs; ++i) {
 
-      void* new_handle = fable_accept(listen_handle);
+      void* new_handle = fable_accept(listen_handle, FABLE_DIRECTION_RECEIVE);
       CHECK_ERROR((!new_handle));
 
       int reducer_thread;

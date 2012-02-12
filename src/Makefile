@@ -43,7 +43,8 @@ SRCS := \
         thread_pool.cpp \
 	io_helpers.cpp \
 	fable_helpers.cpp \
-	fable_unix.cpp
+	fable_unix.cpp \
+	fable_shmem_pipe.cpp
 #
 OBJS := ${SRCS:.cpp=.o}
 
