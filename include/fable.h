@@ -41,9 +41,14 @@ struct fable_buf {
 #define FABLE_SELECT_WRITE 2
 #define FABLE_SELECT_ACCEPT 3
 
+#define FABLE_DIRECTION_DUPLEX 1
+#define FABLE_DIRECTION_SEND 2
+#define FABLE_DIRECTION_RECEIVE 3
+
+// Unix domain sockets
 void fable_init_unixdomain();
-void* fable_connect_unixdomain(const char* name);
-void* fable_listen_unixdomain(const char* name);
+void* fable_connect_unixdomain(const char* name, int direction);
+void* fable_listen_unixdomain(const char* name, int direction);
 void* fable_accept_unixdomain(void* listen_handle);
 void fable_set_nonblocking_unixdomain(void* handle);
 void fable_get_select_fds_unixdomain(void* handle, int type, int* maxfd, fd_set* rfds, fd_set* wfds, fd_set* efds, struct timeval* timeout);
@@ -51,9 +56,25 @@ int fable_ready_unixdomain(void* handle, int type, fd_set* rfds, fd_set* wfds, f
 struct fable_buf* fable_get_write_buf_unixdomain(void* handle, int len);
 struct fable_buf* fable_lend_write_buf_unixdomain(void* handle, const char* buf, int len);
 int fable_release_write_buf_unixdomain(void* handle, struct fable_buf* buf);
-int fable_lend_read_buf(void* handle, char* buf, int len);
-struct fable_buf* fable_get_read_buf(void* handle, int len);
-void fable_release_read_buf(void* handle, struct fable_buf* buf);
+int fable_lend_read_buf_unixdomain(void* handle, char* buf, int len);
+struct fable_buf* fable_get_read_buf_unixdomain(void* handle, int len);
+void fable_release_read_buf_unixdomain(void* handle, struct fable_buf* buf);
 void fable_close_unixdomain(void* handle);
+
+// Shared segments using a unix socket to carry metadata
+void fable_init_shmem_pipe();
+void* fable_connect_shmem_pipe(const char* name, int direction);
+void* fable_listen_shmem_pipe(const char* name, int direction);
+void* fable_accept_shmem_pipe(void* listen_handle);
+void fable_set_nonblocking_shmem_pipe(void* handle);
+void fable_get_select_fds_shmem_pipe(void* handle, int type, int* maxfd, fd_set* rfds, fd_set* wfds, fd_set* efds, struct timeval* timeout);
+int fable_ready_shmem_pipe(void* handle, int type, fd_set* rfds, fd_set* wfds, fd_set* efds);
+struct fable_buf* fable_get_write_buf_shmem_pipe(void* handle, int len);
+struct fable_buf* fable_lend_write_buf_shmem_pipe(void* handle, const char* buf, int len);
+int fable_release_write_buf_shmem_pipe(void* handle, struct fable_buf* buf);
+int fable_lend_read_buf_shmem_pipe(void* handle, char* buf, int len);
+struct fable_buf* fable_get_read_buf_shmem_pipe(void* handle, int len);
+void fable_release_read_buf_shmem_pipe(void* handle, struct fable_buf* buf);
+void fable_close_shmem_pipe(void* handle);
 
 #endif

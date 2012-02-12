@@ -90,3 +90,61 @@ void setnb_fd(int fd) {
   fcntl(fd, F_SETFL, flags);
 
 }
+
+int unix_send_fd(int sockfd, int sendfd) {
+
+  char control[CMSG_SPACE(CMESG_LEN(sizeof(sendfd)))];
+  struct msghdr msg;
+  struct cmsghdr *cmsg;
+  struct iovec iov;
+
+  memset(&msg, 0, sizeof(msg));
+  msg.msg_iov = "FD";
+  msg.msg_iovlen = 2;
+  msg.msg_control = control;
+  msg.msg_controllen = sizeof(control);
+  
+  cmsg = CMSG_FIRSTHDR(&msg);
+  cmsg->cmsg_level = SOL_SOCKET;
+  cmsg->cmsg_type = SCM_RIGHTS;
+  cmsg->cmsg_len = CMSG_LEN(sizeof(sendfd));
+  *(int *)CMSG_DATA(cmsg) = sendfd;
+  
+  return sendmsg(sockfd, &msg, 0);
+  
+}
+
+int unix_recv_fd(int sockfd) {
+
+  char control[CMSG_SPACE(CMESG_LEN(sizeof(int)))];
+  struct msghdr msg;
+  struct cmsghdr *cmsg;
+  struct iovec iov;
+  char databuf[2];
+
+  memset(&msg, 0, sizeof(msg));
+  msg.msg_iov = databuf;
+  msg.msg_iovlen = 2;
+  msg.msg_control = control;
+  msg.msg_controllen = sizeof(control);
+
+  int ret = recvmsg(sockfd, &msg, 0);
+  if(ret == 0)
+    errno = 0;
+  if(ret <= 0)
+    return -1;
+
+  if(databuf[0] != 'F' && databuf[1] != 'D') {
+    errno = EINVAL;
+    return -1;
+  }
+  
+  cmsg = CMSG_FIRSTHDR(&msg);
+  while (cmsg != NULL) {
+    if (cmsg->cmsg_level == SOL_SOCKET
+	&& cmsg->cmsg_type  == SCM_RIGHTS)
+      return *(int *) CMSG_DATA(cmsg);
+    cmsg = CMSG_NXTHDR(&msg, cmsg);
+  }
+
+}

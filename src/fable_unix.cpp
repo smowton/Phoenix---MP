@@ -32,7 +32,8 @@ void fable_init_unixdomain() {
 
 }
 
-void* fable_connect_unixdomain(const char* name) {
+// Ignore direction, all Unix sockets are duplex
+void* fable_connect_unixdomain(const char* name, int direction) {
 
   struct sockaddr_un addr;
   addr.sun_family = AF_UNIX;
@@ -85,7 +86,8 @@ void* fable_listen_unixdomain(const char* name) {
 
 }
 
-void* fable_accept_unixdomain(void* listen_handle) {
+// Ignore direction, all Unix sockets are duplex
+void* fable_accept_unixdomain(void* listen_handle, int direction) {
 
   struct sockaddr_un otherend;
   socklen_t otherend_len = sizeof(otherend);
@@ -243,5 +245,6 @@ void fable_release_read_buf_unixdomain(void* handle, struct fable_buf* buf) {
 void fable_close_unixdomain(void* handle) {
 
   close(*((int*)handle));
+  free(handle);
 
 }
