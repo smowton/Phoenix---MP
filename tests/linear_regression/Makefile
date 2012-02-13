@@ -34,9 +34,10 @@ include $(HOME)/Defines.mk
 LIBS += -L$(HOME)/$(LIB_DIR) -l$(PHOENIX)
 
 L_REG_OBJS = linear_regression.o
-L_REG_MP_OBJS = linear_regression_mp.o
+L_REG_UNIX_OBJS = linear_regression_unix.o
+L_REG_SHM_OBJS = linear_regression_shm.o
 
-PROGS = linear_regression linear_regression_mp
+PROGS = linear_regression linear_regression_unix linear_regression_shm
 
 .PHONY: default all clean
 
@@ -47,14 +48,20 @@ all: $(PROGS)
 linear_regression: $(L_REG_OBJS) $(LIB_DEP)
 	$(CXX) $(CFLAGS) -o $@ $(L_REG_OBJS) $(LIBS)
 
-linear_regression_mp: $(L_REG_MP_OBJS) $(LIB_DEP)
-	$(CXX) $(CFLAGS) -o $@ $(L_REG_MP_OBJS) $(LIBS)
+linear_regression_unix: $(L_REG_UNIX_OBJS) $(LIB_DEP)
+	$(CXX) $(CFLAGS) -o $@ $(L_REG_UNIX_OBJS) $(LIBS)
 
-linear_regression_mp.o: linear_regression.cpp
-	$(CXX) $(CFLAGS) -DCOMM_HACKS -c $< -o $@ -I$(HOME)/$(INC_DIR)
+linear_regression_unix.o: linear_regression.cpp
+	$(CXX) $(CFLAGS) -DCOMM_HACKS -DFABLE_TYPE=unixdomain -c $< -o $@ -I$(HOME)/$(INC_DIR)
+
+linear_regression_shm: $(L_REG_SHM_OBJS) $(LIB_DEP)
+	$(CXX) $(CFLAGS) -o $@ $(L_REG_SHM_OBJS) $(LIBS)
+
+linear_regression_shm.o: linear_regression.cpp
+	$(CXX) $(CFLAGS) -DCOMM_HACKS -DFABLE_TYPE=shmem_pipe -c $< -o $@ -I$(HOME)/$(INC_DIR)
 
 %.o: %.cpp
 	$(CXX) $(CFLAGS) -c $< -o $@ -I$(HOME)/$(INC_DIR)
 
 clean:
-	rm -f $(PROGS) $(L_REG_OBJS) $(L_REG_MP_OBJS)
+	rm -f $(PROGS) $(L_REG_OBJS) $(L_REG_UNIX_OBJS) $(L_REG_SHM_OBJS)

@@ -34,9 +34,10 @@ include $(HOME)/Defines.mk
 LIBS += -L$(HOME)/$(LIB_DIR) -l$(PHOENIX)
 
 HIST_OBJS = histogram.o
-HIST_MP_OBJS = histogram_mp.o
+HIST_UNIX_OBJS = histogram_unix.o
+HIST_SHM_OBJS = histogram_shm.o
 
-PROGS = histogram histogram_mp
+PROGS = histogram histogram_unix histogram_shm
 
 .PHONY: default all clean
 
@@ -47,14 +48,20 @@ all: $(PROGS)
 histogram: $(HIST_OBJS) $(LIB_DEP)
 	$(CXX) $(CFLAGS) -o $@ $(HIST_OBJS) $(LIBS)
 
-histogram_mp: $(HIST_MP_OBJS) $(LIB_DEP)
-	$(CXX) $(CFLAGS) -o $@ $(HIST_MP_OBJS) $(LIBS)
+histogram_unix: $(HIST_UNIX_OBJS) $(LIB_DEP)
+	$(CXX) $(CFLAGS) -o $@ $(HIST_UNIX_OBJS) $(LIBS)
 
-histogram_mp.o: histogram.cpp
-	$(CXX) $(CFLAGS) -DCOMM_HACKS -c $< -o $@ -I$(HOME)/$(INC_DIR)
+histogram_unix.o: histogram.cpp
+	$(CXX) $(CFLAGS) -DCOMM_HACKS -DFABLE_TYPE=unixdomain -c $< -o $@ -I$(HOME)/$(INC_DIR)
+
+histogram_shm: $(HIST_SHM_OBJS) $(LIB_DEP)
+	$(CXX) $(CFLAGS) -o $@ $(HIST_SHM_OBJS) $(LIBS)
+
+histogram_shm.o: histogram.cpp
+	$(CXX) $(CFLAGS) -DCOMM_HACKS -DFABLE_TYPE=shmem_pipe -c $< -o $@ -I$(HOME)/$(INC_DIR)
 
 %.o: %.cpp
 	$(CXX) $(CFLAGS) -c $< -o $@ -I$(HOME)/$(INC_DIR)
 
 clean:
-	rm -f $(PROGS) $(HIST_OBJS) $(HIST_MP_OBJS)
+	rm -f $(PROGS) $(HIST_OBJS) $(HIST_UNIX_OBJS) $(HIST_SHM_OBJS)

@@ -48,7 +48,7 @@ void read_all_fd(int fd, char* buf, int len) {
 
 }
 
-void write_all_fd(int fd, const char* buf, int len) {
+void write_all_fd(int fd, const char* buf, int len, int ignore_close) {
 
   fd_set wfds;
 
@@ -65,17 +65,17 @@ void write_all_fd(int fd, const char* buf, int len) {
       fprintf(stderr, "Select failed: %s\n", strerror(errno));
       exit(1);
     }
-    else if(ret == 0) {
-      fprintf(stderr, "Unexpected EOF writing\n");
-      exit(1);
-    }
 
-    int this_write = write(fd, buf, len);
+    int this_write = send(fd, buf, len, ignore_close ? MSG_NOSIGNAL : 0);
     if(this_write == -1) {
       if(errno == EAGAIN || errno == EINTR)
 	continue;
-      fprintf(stderr, "Write failed: %s\n", strerror(errno));
-      exit(1);
+      if(errno == EPIPE && ignore_close)
+	this_write = len;
+      else {
+	fprintf(stderr, "Write failed: %s\n", strerror(errno));
+	exit(1);
+      }
     }
 
     len -= this_write;
@@ -95,7 +95,7 @@ void setnb_fd(int fd) {
 
 int unix_send_fd(int sockfd, int sendfd) {
 
-  char control[CMSG_SPACE(CMSG_LEN(sizeof(sendfd)))];
+  char control[CMSG_SPACE(sizeof(sendfd))];
   struct msghdr msg;
   struct cmsghdr *cmsg;
   struct iovec iov;
@@ -120,7 +120,7 @@ int unix_send_fd(int sockfd, int sendfd) {
 
 int unix_recv_fd(int sockfd) {
 
-  char control[CMSG_SPACE(CMSG_LEN(sizeof(int)))];
+  char control[CMSG_SPACE(sizeof(int))];
   struct msghdr msg;
   struct cmsghdr *cmsg;
   struct iovec iov;
@@ -135,12 +135,13 @@ int unix_recv_fd(int sockfd) {
   msg.msg_controllen = sizeof(control);
 
   int ret = recvmsg(sockfd, &msg, 0);
+  //printf("Recvmsg return %d errno %d\n", ret, errno);
   if(ret == 0)
     errno = 0;
   if(ret <= 0)
     return -1;
 
-  if(databuf[0] != 'F' && databuf[1] != 'D') {
+  if(databuf[0] != 'F' || databuf[1] != 'D') {
     errno = EINVAL;
     return -1;
   }

@@ -13,14 +13,12 @@ struct fable_buf {
 
 } __attribute__((packed));
 
-#ifndef FABLE_TYPE
-#error "Must define FABLE_TYPE to use the Fable prototype. Available types: unixdomain"
-#endif
-
 #define CONC2(C, D) C ## D
 #define CONC(A, B) CONC2(A, B)
 // Necessary because sub-macros are expanded *after* expansion and *excluding* parameters to ##. Nice.
 // Also, the unix transport must *not* be named 'unix' as unix, lowercase, is #defined to 1 somewhere in libc.
+
+#ifdef FABLE_TYPE
 
 #define fable_init CONC(fable_init_, FABLE_TYPE)
 #define fable_connect CONC(fable_connect_, FABLE_TYPE)
@@ -36,6 +34,8 @@ struct fable_buf {
 #define fable_lend_read_buf CONC(fable_lend_read_buf_, FABLE_TYPE)
 #define fable_release_read_buf CONC(fable_release_read_buf_, FABLE_TYPE)
 #define fable_close CONC(fable_close_, FABLE_TYPE)
+
+#endif
 
 #define FABLE_SELECT_READ 1
 #define FABLE_SELECT_WRITE 2

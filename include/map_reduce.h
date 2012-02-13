@@ -528,13 +528,21 @@ void MapReduce<Impl, D, K, V, Container>::
 map_worker_oop(int fd, int threadid) {
 
   // Create a listening socket for the reducers to obtain their intermediate values.
+  // Create one for each reducer thread to allow us to use simplex communications; this should go away.
 
-  char sock_name[256];
-  int ret = snprintf(sock_name, 256, "mapper_%d_sock", threadid);
-  CHECK_ERROR((ret >= 256));
+  void** listen_handles = new void*[this->num_reduce_tasks];
 
-  void* listen_handle = fable_listen(sock_name);
-  fable_set_nonblocking(listen_handle);
+  for(uint64_t i = 0; i < this->num_reduce_tasks; ++i) {
+    char sock_name[256];
+    int ret = snprintf(sock_name, 256, "mapper_%d_sock_%lu", threadid, i);
+    CHECK_ERROR((ret >= 256));
+    
+    void* listen_handle = fable_listen(sock_name);
+    fable_set_nonblocking(listen_handle);
+
+    listen_handles[i] = listen_handle;
+
+  }
 
   // Deserialise task_ts and handle each as it comes. When we're told we're done, start accepting reducer connections and feed each their intermediate KVs.
 
@@ -605,7 +613,8 @@ map_worker_oop(int fd, int threadid) {
     FD_ZERO(&wfds);
     FD_ZERO(&efds);
 
-    fable_get_select_fds(listen_handle, FABLE_SELECT_ACCEPT, &maxfd, &rfds, &wfds, &efds, &timeout);
+    for(uint64_t i = 0; i < num_reduce_tasks; ++i)
+      fable_get_select_fds(listen_handles[i], FABLE_SELECT_ACCEPT, &maxfd, &rfds, &wfds, &efds, &timeout);
 
     for(unsigned i = 0; i < out_handles.size(); i++) {
 
@@ -620,20 +629,22 @@ map_worker_oop(int fd, int threadid) {
     if(selret == -1)
       continue;
 
-    if(fable_ready(listen_handle, FABLE_SELECT_ACCEPT, &rfds, &wfds, &efds)) {
+    for(uint64_t i = 0; i < num_reduce_tasks; ++i) {
 
-      void* new_handle;
-      while((new_handle = fable_accept(listen_handle, FABLE_DIRECTION_RECEIVE))) {
-	
-	uint64_t reducer_id;
-	fable_read_all(new_handle, (char*)&reducer_id, sizeof(reducer_id));
-	dprintf("Reducer %lu connected\n", reducer_id);
-	out_handles[reducer_id].first = new_handle;
-	fable_set_nonblocking(new_handle);
+      if(fable_ready(listen_handles[i], FABLE_SELECT_ACCEPT, &rfds, &wfds, &efds)) {
+
+	void* new_handle;
+	while((new_handle = fable_accept(listen_handles[i], FABLE_DIRECTION_SEND))) {
+	  
+	  dprintf("Reducer %lu connected\n", i);
+	  out_handles[i].first = new_handle;
+	  fable_set_nonblocking(new_handle);
+	  
+	}
+	CHECK_ERROR((errno != EAGAIN && errno != EINTR));
 	
       }
-      CHECK_ERROR((errno != EAGAIN && errno != EINTR));
-
+      
     }
 
     for(unsigned i = 0; i < out_handles.size(); i++) {
@@ -797,11 +808,10 @@ void MapReduce<Impl, D, K, V, Container>::reduce_worker_oop (int fd, int threadi
       for(unsigned i = 0; i < map_streams; i++) {
 
 	char namebuf[128];
-	int ret = snprintf(namebuf, 128, "mapper_%d_sock", i);
+	int ret = snprintf(namebuf, 128, "mapper_%d_sock_%lu", i, id);
 	CHECK_ERROR((ret >= 128));
         void* handle = fable_connect(namebuf, FABLE_DIRECTION_RECEIVE);
 
-	fable_write_all(handle, (const char*)&id, sizeof(uint64_t));
 	fable_set_nonblocking(handle);
 	handles[i] = handle;
 	ostreams[i] = &sstreams[i];

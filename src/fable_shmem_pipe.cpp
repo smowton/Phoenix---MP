@@ -514,7 +514,7 @@ fable_listen_shmem_pipe(const char* name) {
 
 }
 
-void shmem_pipe_init_recv(struct shmem_pipe_handle_conn* new_handle) {
+void shmem_pipe_init_send(struct shmem_pipe_handle_conn* new_handle) {
 
   new_handle->first_alloc = (struct alloc_node*)calloc(sizeof(*new_handle->first_alloc), 1);
   new_handle->first_alloc->is_free = 1;
@@ -543,7 +543,9 @@ fable_accept_shmem_pipe(void* handle, int direction) {
   // TODO: these are blocking operations, even if the Fable handle is nonblocking.
   int shmem_fd = unix_recv_fd(conn_fd);
   if(shmem_fd == -1) {
+    int save_errno = errno;
     close(conn_fd);
+    errno = save_errno;
     return 0;
   }
 
@@ -552,16 +554,18 @@ fable_accept_shmem_pipe(void* handle, int direction) {
 
   void* ring_addr = mmap(NULL, PAGE_SIZE * seg_pages, PROT_READ|PROT_WRITE, MAP_SHARED, shmem_fd, 0);
   if(ring_addr == MAP_FAILED) {
+    int save_errno = errno;
     close(shmem_fd);
     close(conn_fd);
+    errno = save_errno;
     return 0;
   }
 
   struct shmem_pipe_handle_conn* new_handle = (struct shmem_pipe_handle_conn*)malloc(sizeof(struct shmem_pipe_handle_conn));
   if(!new_handle) {
-    errno = ENOMEM;
     close(shmem_fd);
     close(conn_fd);
+    errno = ENOMEM;
     return 0;
   }
 
@@ -572,8 +576,8 @@ fable_accept_shmem_pipe(void* handle, int direction) {
   new_handle->ring_pages = seg_pages;
   new_handle->direction = direction;
 
-  if(direction == FABLE_DIRECTION_RECEIVE)
-    shmem_pipe_init_recv(new_handle);
+  if(direction == FABLE_DIRECTION_SEND)
+    shmem_pipe_init_send(new_handle);
   // Otherwise memset-0 is enough
 
   return new_handle;
@@ -585,7 +589,7 @@ void* fable_connect_shmem_pipe(const char* name, int direction) {
   // As the connection initiator, it's our responsibility to supply shared memory.
 
   char random_name[22];
-  int ring_pages = pow(2, ring_size);
+  int ring_pages = pow(2, ring_order);
   
   int shm_fd = -1;
   errno = EEXIST;
@@ -635,8 +639,8 @@ void* fable_connect_shmem_pipe(const char* name, int direction) {
   conn_handle->ring_pages = ring_pages;
   conn_handle->direction = direction;
 
-  if(direction == FABLE_DIRECTION_RECEIVE)
-    shmem_pipe_init_recv(conn_handle);
+  if(direction == FABLE_DIRECTION_SEND)
+    shmem_pipe_init_send(conn_handle);
   // Otherwise memset-0 is enough
 
   return conn_handle;
@@ -655,6 +659,8 @@ struct fable_buf* fable_get_read_buf_shmem_pipe(void* handle, unsigned len) {
       return 0;
     }
     if (k < 0) {
+      if(errno == ECONNRESET)
+	errno = 0;
       return 0;
     }
     sp->incoming_bytes += k;
@@ -724,7 +730,7 @@ void fable_release_read_buf_shmem_pipe(void* handle, struct fable_buf* fbuf) {
 
   // TODO: blocking operations regardless of nonblocking status.
   if (sp->outgoing_extent_bytes > ring_size / 8) {
-    write_all_fd(sp->base.fd, (char*)sp->outgoing_extents, sp->nr_outgoing_extents * sizeof(struct extent));
+    write_all_fd(sp->base.fd, (char*)sp->outgoing_extents, sp->nr_outgoing_extents * sizeof(struct extent), 1 /* Allow writing to closed socket */);
     sp->nr_outgoing_extents = 0;
     sp->outgoing_extent_bytes = 0;
   }
@@ -741,8 +747,11 @@ int wait_for_returned_buffers(struct shmem_pipe_handle_conn *sp)
 	static int total_read;
 
 	s = read(sp->base.fd, sp->rx_buf + sp->rx_buf_prod, sizeof(sp->rx_buf) - sp->rx_buf_prod);
-	if (s <= 0)
+	if (s <= 0) {
+	  if(errno == ECONNRESET)
+	    errno = 0;
 	  return s;
+	}
 	total_read += s;
 	sp->rx_buf_prod += s;
 	for (r = 0; r < sp->rx_buf_prod / sizeof(struct extent); r++) {
@@ -787,14 +796,14 @@ int fable_release_write_buf_shmem_pipe(void* handle, struct fable_buf* fbuf)
   struct shmem_pipe_buf *buf = (struct shmem_pipe_buf*)fbuf;
   struct extent ext;
 
-  assert(fbuf->nbufs == 1 && fbuf->bufs[0].iov_base == &buf->iov);
+  assert(fbuf->nbufs == 1 && fbuf->bufs == &buf->iov);
 
   unsigned long offset = ((char*)fbuf->bufs[0].iov_base) - ((char*)sp->ring);
   ext.base = offset;
   ext.size = fbuf->bufs[0].iov_len;
 
   // TODO: Blocking ops in nonblocking context
-  write_all_fd(sp->base.fd, (char*)&ext, sizeof(ext));
+  write_all_fd(sp->base.fd, (char*)&ext, sizeof(ext), 1 /* Allow writing to closed socket */);
 
   assert(sp->nr_alloc_nodes <= 3);
 
@@ -814,20 +823,20 @@ int action_needs_fd(struct shmem_pipe_handle* sp, int type) {
 
   struct shmem_pipe_handle_conn* conn_handle = (struct shmem_pipe_handle_conn*)sp;
 
-   if(type == FABLE_SELECT_ACCEPT) {
-     return 1;
-   }
-   else if(type == FABLE_SELECT_READ) {
-     assert(conn_handle->direction == FABLE_DIRECTION_RECEIVE);
-     return (conn_handle->incoming_bytes_consumed - conn_handle->incoming_bytes < sizeof(struct extent));
-     // Otherwise at least one extent is waiting to be read, so we're ready now!
-   }
-   else {
-     assert(conn_handle->direction == FABLE_DIRECTION_SEND);
-     return !any_shared_space(conn_handle);
-     // Otherwise there's at least one free slot. It might be tiny, but write() could do something, so we must report we're writable.
-   }
-
+  if(type == FABLE_SELECT_ACCEPT) {
+    return 1;
+  }
+  else if(type == FABLE_SELECT_READ) {
+    assert(conn_handle->direction == FABLE_DIRECTION_RECEIVE);
+    return (conn_handle->incoming_bytes_consumed - conn_handle->incoming_bytes < sizeof(struct extent));
+    // Otherwise at least one extent is waiting to be read, so we're ready now!
+  }
+  else {
+    assert(conn_handle->direction == FABLE_DIRECTION_SEND);
+    return !any_shared_space(conn_handle);
+    // Otherwise there's at least one free slot. It might be tiny, but write() could do something, so we must report we're writable.
+  }
+  
 }
 
 void fable_get_select_fds_shmem_pipe(void* handle, int type, int* maxfd, fd_set* rfds, fd_set* wfds, fd_set* efds, struct timeval* timeout) {
@@ -857,7 +866,7 @@ int fable_ready_shmem_pipe(void* handle, int type, fd_set* rfds, fd_set* wfds, f
   
 }
 
-void fable_close(void* handle) {
+void fable_close_shmem_pipe(void* handle) {
 
   struct shmem_pipe_handle *sp = (struct shmem_pipe_handle*)handle;
 

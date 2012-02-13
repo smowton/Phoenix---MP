@@ -34,9 +34,10 @@ include $(HOME)/Defines.mk
 LIBS += -L$(HOME)/$(LIB_DIR) -l$(PHOENIX)
 
 WC_OBJS := word_count.o
-WC_MP_OBJS := word_count_mp.o
+WC_SHM_OBJS := word_count_shm.o
+WC_UNIX_OBJS := word_count_unix.o
 
-PROGS := word_count word_count_mp
+PROGS := word_count word_count_shm word_count_unix
 
 .PHONY: default all clean
 
@@ -44,17 +45,23 @@ default: all
 
 all: $(PROGS)
 
-word_count_mp: word_count_mp.o $(LIB_DEP)
-	$(CXX) $(CFLAGS) -o $@ $(WC_MP_OBJS) $(LIBS)
+word_count_shm: word_count_shm.o $(LIB_DEP)
+	$(CXX) $(CFLAGS) -o $@ $(WC_SHM_OBJS) $(LIBS)
+
+word_count_shm.o: word_count.cpp
+	$(CXX) $(CFLAGS) -DCOMM_HACKS -DFABLE_TYPE=shmem_pipe -c $< -o $@ -I$(HOME)/$(INC_DIR)
+
+word_count_unix: word_count_unix.o $(LIB_DEP)
+	$(CXX) $(CFLAGS) -o $@ $(WC_UNIX_OBJS) $(LIBS)
+
+word_count_unix.o: word_count.cpp
+	$(CXX) $(CFLAGS) -DCOMM_HACKS -DFABLE_TYPE=unixdomain -c $< -o $@ -I$(HOME)/$(INC_DIR)
 
 word_count: $(WC_OBJS) $(LIB_DEP)
 	$(CXX) $(CFLAGS) -o $@ $(WC_OBJS) $(LIBS)
-
-word_count_mp.o: word_count.cpp
-	$(CXX) $(CFLAGS) -DCOMM_HACKS -c $< -o $@ -I$(HOME)/$(INC_DIR)
 
 %.o: %.cpp
 	$(CXX) $(CFLAGS) -c $< -o $@ -I$(HOME)/$(INC_DIR)
 
 clean:
-	rm -f $(PROGS) $(WC_OBJS) $(WC_MP_OBJS)
+	rm -f $(PROGS) $(WC_OBJS) $(WC_SHM_OBJS) $(WC_UNIX_OBJS)

@@ -226,7 +226,7 @@ struct fable_buf* fable_get_read_buf_unixdomain(void* handle, unsigned len) {
       errno = 0;
     return 0;
   }
-  else if(this_read < len) {
+  else if(((unsigned)this_read) < len) {
     ret = (struct fable_buf_unix*)realloc(ret, sizeof(struct fable_buf_unix) + this_read);
     ret->unix_vec.iov_base = &(ret[1]);
   }
